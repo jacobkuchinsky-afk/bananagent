@@ -1,0 +1,10 @@
+# Needs 64-bit Python. The system-wide `python` on this machine is 32-bit,
+# which is why the project ships its own venv:
+#   py -3.13 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+sounddevice==0.5.5   # mic capture (bundles PortAudio; PyAudio has no 3.13 wheel)
+keyboard==0.13.5     # global push-to-talk hotkey
+ollama==0.6.2        # local model client
+numpy==2.5.2         # audio buffers and resampling
+pycaw==20251023      # exact volume control for the set_volume endpoint
+comtypes==1.4.16     # pycaw's COM bindings
