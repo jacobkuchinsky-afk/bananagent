@@ -1,0 +1,15 @@
+# The virtualenv is machine-specific and 64-bit only — recreate it from
+# requirements.txt rather than committing it (see the README).
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Runtime logs written next to the app
+bananagent.log
+ollama-pinned.log
+*.log
+
+# Local tool settings, not part of the project
+.claude/
