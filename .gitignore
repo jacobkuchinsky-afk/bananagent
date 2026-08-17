@@ -2,6 +2,16 @@
 # requirements.txt rather than committing it (see the README).
 .venv/
 
+# The window icon is drawn by icon.py on first run, not authored by hand
+banana.ico
+
+# Kokoro's weights — downloaded, not ours to commit (see the README)
+models/
+
+# The browsing agent's own Chrome profile: its cookies and logins, i.e. exactly
+# the sort of thing that must never end up in a commit
+browser-profile/
+
 # Python bytecode
 __pycache__/
 *.py[cod]

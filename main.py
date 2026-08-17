@@ -8,6 +8,7 @@ Run it with the venv interpreter:  .venv\\Scripts\\python.exe main.py
 Quit with ctrl+shift+q (the window is frameless, so there's no X to click).
 """
 
+import collections
 import os
 import queue
 import sys
@@ -36,10 +37,13 @@ def _ensure_output():
 
 _ensure_output()
 
+import agents
 import brain
 import config
 import endpoints
 import recorder
+import voice
+from dashboard import Dashboard
 from overlay import Overlay
 from recorder import Recorder
 
@@ -50,12 +54,23 @@ class App:
     def __init__(self):
         self.ui = Overlay()
         self.rec = Recorder()
+        self.speaker = voice.Speaker()
         self.events = queue.Queue()
 
         self.gen = 0  # bumps every interaction; stale workers check it and bail
         self.held = False
         self.pressed_at = 0.0
         self._hide_job = None
+
+        # What the dashboard reports about this session.
+        self.started_at = time.time()
+        self.turns = 0
+        self.last_reply = None
+        self.reply_times = collections.deque(maxlen=40)
+
+        # Starts minimized: the taskbar gets a banana to click, and nothing
+        # opens a window in your face at login.
+        self.dash = Dashboard(self.ui.root, self)
 
         endpoints.bind(self)  # lets endpoints act on the running app
         self._hook_keys()
@@ -68,6 +83,14 @@ class App:
             self.ui.root.mainloop()
         finally:
             self.rec.close()
+            self.speaker.close()
+            # Agents outlive a single question by design, so quitting has to go
+            # and shut them down — otherwise the agent's Chrome is left running.
+            for agent in agents.all_agents():
+                try:
+                    (getattr(agent, "close", None) or agent.stop)()
+                except Exception:
+                    pass
 
     # -- input --------------------------------------------------------------
     def _hook_keys(self):
@@ -150,6 +173,7 @@ class App:
         self.held = True
         self.pressed_at = time.time()
         self.gen += 1
+        self.speaker.stop()  # asking again cuts the previous answer off
         self._cancel_autohide()
         self.ui.clear()
         self.ui.set_state(Overlay.LISTENING)
@@ -183,16 +207,22 @@ class App:
             wav = recorder.to_wav_bytes(audio)
             print(f"\n[you: {audio.size / config.SAMPLE_RATE:.1f}s of audio]")
 
+            started = time.time()
             reply = []
             for chunk in brain.stream(wav):
                 if gen != self.gen:
                     return
                 reply.append(chunk)
                 self.events.put(("token", (gen, chunk)))
+                self.speaker.feed(chunk)
                 sys.stdout.write(chunk)
                 sys.stdout.flush()
             print()
+            self.speaker.finish()
 
+            self.last_reply = round(time.time() - started, 2)
+            self.reply_times.append(self.last_reply)
+            self.turns += 1
             self.events.put(("done", (gen, "".join(reply))))
         except Exception as e:
             traceback.print_exc()
