@@ -40,7 +40,7 @@ def param(kind, description, required=False, enum=None, default=None):
 
 
 class Endpoint:
-    def __init__(self, fn, name, tier, description, params, returns):
+    def __init__(self, fn, name, tier, description, params, returns, agent=None):
         self.fn = fn
         self.name = name
         self.tier = tier
@@ -48,6 +48,8 @@ class Endpoint:
         self.params = params or {}
         self.returns = (returns or "").strip()
         self.module = fn.__module__.rsplit(".", 1)[-1]
+        # Which agent this drives, if any — the dashboard groups by it.
+        self.agent = agent
 
     @property
     def full_description(self):
@@ -102,9 +104,9 @@ class Endpoint:
         return self.fn(**kwargs)
 
 
-def endpoint(tier, description, params=None, returns=None, name=None):
+def endpoint(tier, description, params=None, returns=None, name=None, agent=None):
     def wrap(fn):
-        ep = Endpoint(fn, name or fn.__name__, tier, description, params, returns)
+        ep = Endpoint(fn, name or fn.__name__, tier, description, params, returns, agent)
         if ep.name in _REGISTRY:
             raise ValueError(f"duplicate endpoint name: {ep.name}")
         _REGISTRY[ep.name] = ep
@@ -120,6 +122,11 @@ def all_endpoints():
 
 def by_tier(tier):
     return [e for e in all_endpoints() if e.tier == tier]
+
+
+def by_agent(name):
+    """Everything that drives one agent — what its dashboard row lists."""
+    return [e for e in all_endpoints() if e.agent == name]
 
 
 def get(name):

@@ -199,8 +199,11 @@ def clipboard_write(text):
 @endpoint(
     tier=MAJOR,
     description=(
-        "Opens a web address in the default browser, bringing that window to the "
-        "front. The address must be a full URL such as https://example.com."
+        "Puts a web page on screen in the default browser and does nothing "
+        "further — it cannot read the page, fill anything in, or click "
+        "anything. Use it only when the user just wants to look at something. "
+        "If they want something *done* on a website, that is the browsing "
+        "agent's job, not this."
     ),
     params={"url": param("string", "The full URL to open.", required=True)},
 )

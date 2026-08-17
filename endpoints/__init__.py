@@ -16,6 +16,7 @@ from .registry import (  # noqa: F401  (re-exported for endpoint modules to use)
     all_endpoints,
     app,
     bind,
+    by_agent,
     by_tier,
     catalog_prompt,
     dispatch,

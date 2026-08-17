@@ -8,3 +8,10 @@ ollama==0.6.2        # local model client
 numpy==2.5.2         # audio buffers and resampling
 pycaw==20251023      # exact volume control for the set_volume endpoint
 comtypes==1.4.16     # pycaw's COM bindings
+# Local text-to-speech. Pulls onnxruntime and a bundled espeak-ng, not torch.
+# The weights are downloaded separately — see the README.
+kokoro-onnx==0.5.0
+# The browsing agent. Drives Chrome over CDP directly — no Playwright, no Node,
+# and no Browserbase account: the LLM is a local callback and the browser is the
+# Chrome you already have.
+stagehand==4.0.1

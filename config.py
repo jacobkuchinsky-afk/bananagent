@@ -19,7 +19,7 @@ CHUNK = 512
 # shuffling that happens when you plug things in — unlike a hard-coded number.
 # Set INPUT_DEVICE to an int from `python recorder.py` to override completely,
 # or set both to None to just use the Windows default.
-INPUT_DEVICE_NAME = "Microphone Array"
+INPUT_DEVICE_NAME = "INSIGNIA"
 INPUT_DEVICE = None
 # Preferred host APIs, best first, when a name matches several entries.
 HOST_API_ORDER = ("MME", "Windows WASAPI", "Windows DirectSound")
@@ -79,6 +79,23 @@ KEEP_ALIVE = "30m"
 # retried quickly, but loose enough for a cold model load (~60s).
 REQUEST_TIMEOUT = 100.0
 
+# --- Speech ------------------------------------------------------------------
+# Replies are spoken with Kokoro, locally, off the same CPU. Synthesis runs at
+# roughly 3x real time, so speech starts on the first finished sentence rather
+# than waiting for the whole answer. Turn this off and the app is silent but
+# otherwise unchanged.
+SPEAK = True
+# One of 54 voices; `python -m voice` lists and demos them. The first letter is
+# the accent (a American, b British, e Spanish, f French, i Italian, j Japanese,
+# p Portuguese, z Chinese) and the second is the speaker's gender.
+VOICE = "af_heart"
+VOICE_SPEED = 1.0  # 0.5 to 2.0
+VOICE_LANG = "en-us"
+# Downloaded rather than committed — see the README. Missing files just mean no
+# speech; nothing else notices.
+TTS_MODEL = "models/kokoro-v1.0.fp16.onnx"
+TTS_VOICES = "models/voices-v1.0.bin"
+
 # --- Which Ollama server -----------------------------------------------------
 # Ollama 0.30+ can't decode speech for gemma4 (it hears that you spoke but not
 # what you said — see the README). 0.20.7 does. So we run a pinned 0.20.7 on
@@ -94,6 +111,40 @@ OLLAMA_START_TIMEOUT = 45.0
 # It's ~9.6 GB resident, so turn this off if you'd rather not give that up at
 # login — the app still works, the first question is just slow.
 WARM_ON_START = True
+
+# --- The browsing agent ------------------------------------------------------
+# Its model runs on the *system* Ollama, not the pinned 0.20.7 below: that copy
+# only exists because old Ollama can still hear speech, and a 27B tool-caller has
+# no business on a two-year-old build. If this tag isn't pulled the agent falls
+# back to the closest installed model and says so.
+AGENT_MODEL = "qwen3.8:27b"
+AGENT_OLLAMA_HOST = "http://127.0.0.1:11434"
+AGENT_OPTIONS = {"temperature": 0.2}  # picking the next click wants a steady hand
+AGENT_KEEP_ALIVE = "30m"
+AGENT_THINK = False  # the reasoning trace fights with constrained JSON decoding
+# How many steps one task gets before it has to stop and report.
+AGENT_MAX_STEPS = 25
+# How many past steps the model is reminded of each time.
+AGENT_MEMORY = 12
+# Chrome, not a downloaded Chromium — the one you already have. None to let
+# Stagehand find its own.
+AGENT_CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+# Its own profile directory, so logging into a site once sticks for later tasks.
+AGENT_PROFILE = "browser-profile"
+# Watch it work. Headless is faster but you can't see what it's about to do,
+# and you're the one approving the steps that matter.
+AGENT_HEADLESS = False
+AGENT_VIEWPORT = (1280, 900)
+# Send the model a picture of the page as well as the text. qwen3.8 takes image
+# input, and some pages only make sense looked at.
+AGENT_SCREENSHOTS = True
+# Page text handed to the model per step. Too much buries the actual controls.
+AGENT_PAGE_CHARS = 6000
+# One step's thinking, and how long an approval waits before it gives up.
+AGENT_STEP_SECONDS = 240.0
+AGENT_APPROVAL_SECONDS = 600.0
+# Leave Chrome open between tasks. Off closes it when each task ends.
+AGENT_KEEP_BROWSER = True
 
 # --- Overlay ----------------------------------------------------------------
 # There's no panel: the window is fully transparent and only the orb and the
