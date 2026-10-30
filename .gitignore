@@ -12,6 +12,19 @@ models/
 # the sort of thing that must never end up in a commit
 browser-profile/
 
+# The Vercel and Neon keys the coding agent deploys with, and the CLIs
+# themselves (tools/package.json says which; npm install --prefix tools)
+secrets.env
+tools/node_modules/
+tools/package-lock.json
+
+# Logins to outside platforms (integrations/): refresh tokens, as good as a
+# password to those accounts
+integrations/tokens/
+
+# Files people send BananaGent on Discord
+discord-files/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
@@ -23,3 +36,17 @@ ollama-pinned.log
 
 # Local tool settings, not part of the project
 .claude/
+prompts/history/
+memory/MEMORY.md
+memory/conversation.json*
+memory/review.json*
+memory/history/
+business/BUSINESS.md
+business/data.json*
+business/history/
+subagents/history/
+agents/history/
+
+# The coding agent's sandbox: projects it builds, its Claude session ids and
+# the full logs of every exchange with Claude
+sandbox/

@@ -24,7 +24,7 @@ SPIN_TURNS = 1.35  # how far it rotates while forming
 
 PALETTES = {
     # state: (body, core, highlight)
-    "listening": ("#e8a317", "#ffc93c", "#fff3c4"),
+    "typing": ("#e8a317", "#ffc93c", "#fff3c4"),
     "thinking": ("#e0980f", "#ffc226", "#fff0b8"),
     "answering": ("#d9930f", "#ffd76a", "#fff6d5"),
     "error": ("#c0392b", "#ff6b5b", "#ffd5cf"),
@@ -43,10 +43,10 @@ class WaterOrb:
         self._t0 = None
 
         blank = (0, 0, 0, 0, 0, 0)
-        self._body = canvas.create_polygon(blank, smooth=True, fill=PALETTES["listening"][0], outline="")
-        self._core = canvas.create_polygon(blank, smooth=True, fill=PALETTES["listening"][1], outline="")
-        self._spec = canvas.create_oval(0, 0, 0, 0, fill=PALETTES["listening"][2], outline="")
-        self._drops = [canvas.create_oval(0, 0, 0, 0, fill=PALETTES["listening"][1], outline="")
+        self._body = canvas.create_polygon(blank, smooth=True, fill=PALETTES["typing"][0], outline="")
+        self._core = canvas.create_polygon(blank, smooth=True, fill=PALETTES["typing"][1], outline="")
+        self._spec = canvas.create_oval(0, 0, 0, 0, fill=PALETTES["typing"][2], outline="")
+        self._drops = [canvas.create_oval(0, 0, 0, 0, fill=PALETTES["typing"][1], outline="")
                        for _ in range(6)]
 
     def restart(self, now):
@@ -78,7 +78,7 @@ class WaterOrb:
         e = _ease_out(t)
         f = 1.0 - e  # 1 while bending into shape, 0 once settled
 
-        body, core, spec = PALETTES.get(state, PALETTES["listening"])
+        body, core, spec = PALETTES.get(state, PALETTES["typing"])
         phase = now * 6.0
 
         # Grows in fast, overshoots a little, then tightens to its resting size.

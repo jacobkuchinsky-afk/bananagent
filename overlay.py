@@ -1,11 +1,12 @@
-"""The always-on-top corner widget: a water orb, and the model's answer.
+"""The always-on-top corner widget: a water orb, a text box, and the answer.
 
-There's no panel — the window itself is fully transparent and only the orb and
-text are painted, so it floats over whatever is on screen. Text gets a dark
-shadow instead of a backdrop, since it has to stay legible against anything.
+There's no panel — the window itself is fully transparent and only the orb,
+the box and the text are painted, so it floats over whatever is on screen. Text
+gets a dark outline instead of a backdrop, since it has to stay legible against
+anything.
 
-The orb is pinned to the bottom of the window and the answer grows upward, so
-the orb never jumps around as text arrives.
+The orb and the box share the bottom row of the window and the answer grows
+upward above them, so neither jumps around as text arrives.
 
 Tkinter insists on owning the main thread, so everything here must be called
 from it — main.py funnels worker-thread events through a queue to keep that true.
@@ -17,6 +18,8 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 import config
+import markup
+from dashboard import CARD, INK, MUTED, NAV, SHADOW, text_box
 from water import WaterOrb
 
 # Any pixel painted this color is punched out of the window entirely. With no
@@ -54,15 +57,16 @@ def _work_area():
 
 class Overlay:
     IDLE = "idle"
-    LISTENING = "listening"
+    TYPING = "typing"
     THINKING = "thinking"
     ANSWERING = "answering"
     ERROR = "error"
 
-    def __init__(self):
+    def __init__(self, on_submit=None):
+        self.on_submit = on_submit  # called with the box's text on Enter
+        self._prev_focus = None     # whoever had the keyboard before the box took it
         self.scale = _dpi_setup()
         self.state = self.IDLE
-        self.level = 0.0  # mic loudness 0..1, driven from outside
         self._visible = False
         self._fade = 0.0
         self._body_dirty = False
@@ -88,6 +92,8 @@ class Overlay:
         self.canvas.pack(fill="both", expand=True)
 
         self._font_body = tkfont.Font(family="Segoe UI", size=-self._px(13), weight="bold")
+        self._font_box = tkfont.Font(family="Segoe UI Semibold", size=-self._px(14))
+        self._font_chip = tkfont.Font(family="Segoe UI Symbol", size=-self._px(13), weight="bold")
         self._line_h = self._font_body.metrics("linespace")
 
         self._build()
@@ -97,6 +103,7 @@ class Overlay:
     # -- public API (main thread only) --------------------------------------
     def set_state(self, state):
         was_hidden = not self._visible
+        was_typing = self.state == self.TYPING
         self.state = state
         if state == self.IDLE:
             self.hide()
@@ -105,6 +112,23 @@ class Overlay:
             if was_hidden:
                 # Bend into existence each time it wakes up.
                 self.orb.restart(time.perf_counter())
+        if state == self.TYPING:
+            self.canvas.itemconfigure("box", state="normal")
+            self.box.delete(0, "end")
+            self._take_focus()
+        else:
+            self.canvas.itemconfigure("box", state="hidden")
+            if was_typing:
+                self._give_back_focus()
+        if state in (self.IDLE, self.TYPING):
+            self.set_status(None)  # the box takes that spot; a stale status shouldn't come back
+
+    def set_status(self, text):
+        """A grey line beside the orb, where the box sits while typing — what
+        the model is doing right now, like which tool it's running. None clears it."""
+        for item in self._status_items:
+            self.canvas.itemconfigure(item, text=text or "",
+                                      state="normal" if text else "hidden")
 
     def append(self, chunk):
         """Add a streamed token to the answer."""
@@ -128,6 +152,66 @@ class Overlay:
 
     def hide(self):
         self._visible = False
+
+    # -- keyboard focus -----------------------------------------------------
+    def _hwnd(self):
+        try:
+            return int(self.root.wm_frame(), 16)
+        except Exception:
+            return self.root.winfo_id()
+
+    def _take_focus(self, tries=4):
+        """Pull the keyboard over to the box, from whatever app had it.
+
+        Windows won't hand the foreground to a background process just because
+        it asked, which is what the hotkey makes us. Borrowing the current
+        foreground thread's input state for a moment is what gets it through.
+        It can still lose a race with the window being mapped, so it checks
+        shortly after and tries again if the box didn't end up with the keys.
+        """
+        if self.state != self.TYPING:
+            return
+        self.root.update_idletasks()  # the Entry has to exist on screen to take focus
+        user32 = ctypes.windll.user32
+        fg = user32.GetForegroundWindow()
+        mine = self._hwnd()
+        if fg and fg != mine:
+            self._prev_focus = fg
+        fg_thread = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        me = ctypes.windll.kernel32.GetCurrentThreadId()
+        attached = bool(fg_thread and fg_thread != me
+                        and user32.AttachThreadInput(me, fg_thread, True))
+        try:
+            user32.BringWindowToTop(mine)
+            user32.SetForegroundWindow(mine)
+        finally:
+            if attached:
+                user32.AttachThreadInput(me, fg_thread, False)
+        self.box.focus_force()
+        self.root.after(80, lambda: self._check_focus(tries))
+
+    def _check_focus(self, tries):
+        if self.state != self.TYPING or self._has_focus():
+            return
+        if tries > 1:
+            self._take_focus(tries - 1)
+        else:
+            print("[overlay] couldn't take the keyboard; click the box to type")
+
+    def _has_focus(self):
+        return (ctypes.windll.user32.GetForegroundWindow() == self._hwnd()
+                and self.root.focus_get() is self.box)
+
+    def _give_back_focus(self):
+        prev, self._prev_focus = self._prev_focus, None
+        if prev and ctypes.windll.user32.IsWindow(prev):
+            ctypes.windll.user32.SetForegroundWindow(prev)
+
+    def _submit(self, _event=None):
+        text = self.box.get().strip()
+        if text and self.on_submit:
+            self.on_submit(text)
+        return "break"
 
     # -- construction -------------------------------------------------------
     def _px(self, n):
@@ -153,6 +237,63 @@ class Overlay:
         )
         self.orb = WaterOrb(self.canvas, self.orb_r, self._px)
 
+        # The status line: grey, with the same black ring as the answer so it
+        # stays readable over anything. The last item is the grey text itself.
+        self._font_status = tkfont.Font(family="Segoe UI", size=-self._px(12), slant="italic")
+        self._status_items = [
+            self.canvas.create_text(0, 0, text="", anchor="w", font=self._font_status,
+                                    fill=fill, state="hidden")
+            for fill in ["#000000"] * len(self._OUTLINE) + ["#b8b8b8"]
+        ]
+
+        # The box is a dashboard card in miniature — white, a hard black
+        # outline, an offset black shadow — with a borderless Entry sitting
+        # inside it. Every outer edge of the panel is black, so its
+        # antialiasing blends into the near-black transparency key instead of
+        # leaving a light fringe. It's the one part of the window that takes clicks.
+        self.box_x = self.pad * 2 + self.orb_r * 2
+        self.box_w = self.W - self.box_x - self.pad - self._px(SHADOW)
+        self.box_h = self._px(40)
+        self._chip_w = self._px(30)
+        self._panel_img = self._render_panel()
+        self._panel = self.canvas.create_image(0, 0, anchor="nw", image=self._panel_img,
+                                               tags="box")
+        # The Enter key-cap at the right end: it says what sends the message.
+        self._chip = self.canvas.create_text(0, 0, text="↵", font=self._font_chip,
+                                             fill=INK, tags="box")
+
+        self.box_var = tk.StringVar()
+        self.box = tk.Entry(
+            self.root, textvariable=self.box_var, font=self._font_box,
+            bg=CARD, fg=INK, insertbackground=INK, insertwidth=self._px(2),
+            relief="flat", bd=0, highlightthickness=0,
+            selectbackground=NAV, selectforeground=INK)
+        self.box.bind("<Return>", self._submit)
+        self.box.bind("<Escape>", lambda _e: self.set_state(self.IDLE))
+        self._inset = self._px(14)
+        self._box_item = self.canvas.create_window(
+            0, 0, window=self.box, anchor="w", tags="box",
+            width=self.box_w - self._inset - self._chip_w - self._px(18))
+
+        # Placeholder, laid over the empty Entry rather than typed into it, so
+        # it can never be submitted or have to be selected away.
+        self._hint = tk.Label(self.box, text="Ask BananaGent…", font=self._font_box,
+                              bg=CARD, fg=MUTED, bd=0, padx=0, pady=0)
+        self._hint.bind("<Button-1>", lambda _e: self.box.focus_set())
+        self.box_var.trace_add("write", lambda *_: self._update_hint())
+        self._update_hint()
+        self.canvas.itemconfigure("box", state="hidden")
+
+    def _render_panel(self):
+        s, self._panel_pad = text_box(self._px, self.box_w, self.box_h, self._chip_w)
+        return s.photo()
+
+    def _update_hint(self):
+        if self.box_var.get():
+            self._hint.place_forget()
+        else:
+            self._hint.place(x=self._px(5), rely=0.5, anchor="w")  # clear of the caret
+
     # -- animation ----------------------------------------------------------
     def _tick(self):
         self.root.after(16, self._tick)  # ~60fps, the swirl deserves it
@@ -175,17 +316,17 @@ class Overlay:
             self._body_dirty = False
             self._relayout()
 
-        churn = {self.THINKING: 1.0, self.LISTENING: 0.25}.get(self.state, 0.0)
-        level = self.level if self.state == self.LISTENING else 0.0
+        churn = {self.THINKING: 1.0, self.TYPING: 0.25}.get(self.state, 0.0)
         h = int(self.canvas.cget("height") or 0)
-        self.orb.render(
-            now,
-            self.pad + self.orb_r,
-            h - self.pad - self.orb_r,
-            self.state,
-            level=level,
-            churn=churn,
-        )
+        cy = h - self.pad - self.orb_r
+        top = cy - self.box_h / 2
+        self.canvas.coords(self._panel, self.box_x - self._panel_pad, top - self._panel_pad)
+        self.canvas.coords(self._box_item, self.box_x + self._inset, cy)
+        off = max(1, self._px(1))
+        for item, (dx, dy) in zip(self._status_items, self._OUTLINE + [(0, 0)]):
+            self.canvas.coords(item, self.box_x + dx * off, cy + dy * off)
+        self.canvas.coords(self._chip, self.box_x + self.box_w - self._px(7) - self._chip_w / 2, cy)
+        self.orb.render(now, self.pad + self.orb_r, cy, self.state, churn=churn)
 
     # -- sizing / placement -------------------------------------------------
     def _wrapped_lines(self, content):
@@ -233,7 +374,9 @@ class Overlay:
 
     def _relayout(self):
         orb_block = self.pad * 2 + self.orb_r * 2
-        text = self._text.strip()
+        # Replies are markdown for the Chat tab; here they're read as plain
+        # text, so the markup comes off (buttons show as their labels).
+        text = (self._text if self.state == self.ERROR else markup.plain(self._text)).strip()
         if not text:
             self.canvas.itemconfig(self._label, text="")
             for s in self._shadows:

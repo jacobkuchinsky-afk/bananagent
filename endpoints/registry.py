@@ -15,7 +15,9 @@ That single declaration produces all three things the system needs: the JSON
 schema handed to the model as a callable tool, the line describing it in the
 system prompt, and the dispatch target when a call comes back. There is no
 second place to register anything — drop a new module in this package and its
-endpoints appear everywhere automatically.
+endpoints appear everywhere automatically. The one exception is tools the coding
+agent makes for BananaGent, which are declared in files rather than code: they
+come in through register() and stay current through refresh() (see toolbox.py).
 
 Descriptions are what the model actually reasons over, so they state exactly
 what the endpoint does and what it returns, not a vague label.
@@ -26,6 +28,17 @@ import traceback
 
 MAJOR = "major"  # changes something: the app, the machine, or the outside world
 MINOR = "minor"  # only reads and reports; calling it changes nothing
+
+# Who an endpoint is for. The assistant's tool list is what it reads before
+# every reply, and the longer it gets the worse its tool choice (see the
+# README), so tools only another model needs live in a scope of their own —
+# the coding agent's sandbox and Claude tools are "coder". A scoped endpoint is
+# left out of the assistant's catalog and refused if it calls one anyway.
+ASSISTANT = "assistant"
+CODER = "coder"
+# Part of the call protocol rather than a job — keep_going — so every scope
+# gets it, and every catalog lists it.
+EVERYONE = "everyone"
 
 _REGISTRY = {}
 _CONTEXT = None
@@ -40,7 +53,8 @@ def param(kind, description, required=False, enum=None, default=None):
 
 
 class Endpoint:
-    def __init__(self, fn, name, tier, description, params, returns, agent=None):
+    def __init__(self, fn, name, tier, description, params, returns, agent=None,
+                 scope=ASSISTANT, result_chars=None):
         self.fn = fn
         self.name = name
         self.tier = tier
@@ -50,6 +64,10 @@ class Endpoint:
         self.module = fn.__module__.rsplit(".", 1)[-1]
         # Which agent this drives, if any — the dashboard groups by it.
         self.agent = agent
+        self.scope = scope
+        # How much of a result the model is shown; None is TOOL_RESULT_CHARS.
+        # Tools that hand back a big piece of work get more.
+        self.result_chars = result_chars
 
     @property
     def full_description(self):
@@ -104,20 +122,60 @@ class Endpoint:
         return self.fn(**kwargs)
 
 
-def endpoint(tier, description, params=None, returns=None, name=None, agent=None):
+def endpoint(tier, description, params=None, returns=None, name=None, agent=None,
+             scope=ASSISTANT, result_chars=None):
     def wrap(fn):
-        ep = Endpoint(fn, name or fn.__name__, tier, description, params, returns, agent)
-        if ep.name in _REGISTRY:
-            raise ValueError(f"duplicate endpoint name: {ep.name}")
-        _REGISTRY[ep.name] = ep
+        ep = Endpoint(fn, name or fn.__name__, tier, description, params, returns, agent,
+                      scope, result_chars)
+        register(ep)
         fn.endpoint = ep
         return fn
     return wrap
 
 
+def register(ep):
+    """Add an endpoint made at runtime rather than by the decorator — the
+    tools the coding agent makes (toolbox.py)."""
+    if ep.name in _REGISTRY:
+        raise ValueError(f"duplicate endpoint name: {ep.name}")
+    _REGISTRY[ep.name] = ep
+    return ep
+
+
+def unregister(name):
+    return _REGISTRY.pop(name, None)
+
+
+# Called before the registry is read, so endpoints kept on disk (toolbox.py)
+# can be brought up to date — added, changed or removed — without a restart.
+_REFRESHERS = []
+
+
+def on_refresh(fn):
+    _REFRESHERS.append(fn)
+    return fn
+
+
+def refresh():
+    for fn in _REFRESHERS:
+        try:
+            fn()
+        except Exception:
+            traceback.print_exc()
+
+
 # -- access -----------------------------------------------------------------
-def all_endpoints():
-    return sorted(_REGISTRY.values(), key=lambda e: (e.tier != MAJOR, e.module, e.name))
+def all_endpoints(scope=ASSISTANT):
+    """Every endpoint in one scope (EVERYONE's included), or in all of them
+    with scope=None."""
+    refresh()
+    return sorted((e for e in list(_REGISTRY.values())
+                   if scope is None or e.scope in (scope, EVERYONE)),
+                  key=lambda e: (e.tier != MAJOR, e.module, e.name))
+
+
+def names(scope=ASSISTANT):
+    return {e.name for e in all_endpoints(scope)}
 
 
 def by_tier(tier):
@@ -126,44 +184,51 @@ def by_tier(tier):
 
 def by_agent(name):
     """Everything that drives one agent — what its dashboard row lists."""
-    return [e for e in all_endpoints() if e.agent == name]
+    return [e for e in all_endpoints(None) if e.agent == name]
 
 
 def get(name):
+    refresh()
     return _REGISTRY.get(name)
 
 
 def tools_schema():
-    """Everything, in the shape Ollama's `tools` parameter wants."""
+    """The assistant's tools, in the shape Ollama's `tools` parameter wants."""
     return [e.schema() for e in all_endpoints()]
 
 
-def catalog_prompt():
-    """The endpoint list as it appears in the system prompt, split by tier."""
-    lines = []
-    major, minor = by_tier(MAJOR), by_tier(MINOR)
-    if major:
-        lines.append(
-            "MAJOR endpoints — each one CHANGES something (this app, the computer, "
-            "or the outside world). Call one only when the user clearly asked for "
-            "that action. Never call one to look something up."
-        )
-        lines += [f"  {e.signature()} — {e.full_description}" for e in major]
-    if minor:
-        lines.append("")
-        lines.append(
-            "MINOR endpoints — these only read and report. They change nothing, "
-            "so call them freely whenever they would answer the question."
-        )
-        lines += [f"  {e.signature()} — {e.full_description}" for e in minor]
-    return "\n".join(lines)
+def catalog_prompt(names=None):
+    """Every endpoint as the model reads it in the system prompt — or just
+    those in `names`, which is how a subagent sees only its own tools.
+
+    The model calls tools by writing [[call name {json}]] (see brain.py), so
+    this is the only place it learns what exists and what arguments each
+    takes. One entry per tool: the name, its tier, what it does, then each
+    argument with its type, whether it's required, and its allowed values.
+    """
+    def entry(e):
+        head = f"- {e.name} ({e.tier.upper()}): {e.description}"
+        if e.returns:
+            head += f" Returns: {e.returns}"
+        lines = [head]
+        for pname, p in e.params.items():
+            spec = p["spec"]
+            bits = [spec["type"], "required" if p["required"] else "optional"]
+            if spec.get("enum"):
+                bits.append("one of " + ", ".join(map(str, spec["enum"])))
+            lines.append(f"    {pname} ({'; '.join(bits)}): {spec['description']}")
+        return "\n".join(lines)
+
+    chosen = all_endpoints() if names is None else \
+        [e for e in all_endpoints(None) if e.name in names]
+    return "\n".join(entry(e) for e in chosen)
 
 
 def dispatch(name, args):
     """Execute an endpoint by name. Never raises — the model gets the error text."""
     ep = get(name)
     if ep is None:
-        known = ", ".join(sorted(_REGISTRY)) or "none"
+        known = ", ".join(sorted(list(_REGISTRY))) or "none"
         return {"ok": False, "error": f"No endpoint named '{name}'. Available: {known}"}
     try:
         result = ep.call(args or {})

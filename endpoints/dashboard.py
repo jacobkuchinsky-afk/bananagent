@@ -1,6 +1,6 @@
 """Endpoints for the dashboard window.
 
-Everything the dashboard does by hand, the model can do by voice: open it,
+Everything the dashboard does by hand, the model can do through an endpoint: open it,
 put it away, switch pages, force a fresh reading, and read out what it says.
 The numbers here come from the same snapshot the window paints, so asking
 "how much of the model is on the GPU" and looking at the gauge can't disagree.
@@ -43,12 +43,12 @@ def dashboard_status():
 @endpoint(
     tier=MINOR,
     description=(
-        "Returns the full diagnostic reading the dashboard displays: which model "
-        "is loaded, its size and quantization and context window, whether it is "
-        "resident and how much of it sits on the graphics card, the model "
-        "server's address and version, memory use, and this session's reply "
-        "times. Use this for any question about how the assistant or the model "
-        "is doing."
+        "Returns the full diagnostic reading the dashboard displays: the "
+        "model answering messages, its size and quantization and context window, "
+        "whether it is loaded and how much of it sits on the graphics card, the "
+        "Ollama server's address and version, memory use, and this session's "
+        "message count and reply times. Use this for any question about how the "
+        "assistant or the model is doing."
     ),
     returns="An object with server, model, loaded, machine and app sections.",
 )
@@ -64,9 +64,9 @@ def dashboard_diagnostics():
 @endpoint(
     tier=MAJOR,
     description=(
-        "Opens the dashboard window and brings it to the front, showing "
-        "diagnostics about the model and the assistant. Call this whenever the "
-        "user asks to see, open or show the dashboard."
+        "Opens the dashboard window and brings it to the front, on whichever "
+        "page it was last showing (the chat, unless changed). Call this "
+        "whenever the user asks to see, open or show the dashboard."
     ),
 )
 def open_dashboard():
@@ -89,12 +89,14 @@ def close_dashboard():
 @endpoint(
     tier=MAJOR,
     description=(
-        "Switches the dashboard to one of its pages. 'diagnostics' is about the "
-        "model and this assistant; 'agents' lists the agents that can be sent "
-        "off to do a job, and what each one can do."
+        "Switches the dashboard to one of its pages. 'chat' is the conversation "
+        "with the assistant; 'diagnostics' is about the model and this "
+        "assistant; 'agents' lists the agents that can be sent off to do a job, "
+        "and what each one can do; 'prompts' is where the user edits every "
+        "prompt file by hand."
     ),
     params={"page": param("string", "Which page to show.", required=True,
-                          enum=["diagnostics", "agents"])},
+                          enum=["chat", "diagnostics", "agents", "prompts"])},
 )
 def dashboard_show_page(page):
     dash = _dash()
@@ -110,6 +112,6 @@ def dashboard_show_page(page):
     ),
 )
 def dashboard_refresh():
-    # Off the UI thread on purpose — this one talks to the model server.
+    # Off the UI thread on purpose — this one talks to the Ollama server.
     _dash().refresh()
     return "Dashboard refreshed."

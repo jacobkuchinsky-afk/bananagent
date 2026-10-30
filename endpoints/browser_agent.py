@@ -1,4 +1,4 @@
-"""Endpoints for the browsing agent — the voice side of the Agents tab.
+"""Endpoints for the browsing agent — what the model sees of the Agents tab.
 
 Kept deliberately few and deliberately short. The assistant's own model is a
 small one, and adding nine endpoints here took its tool choice from 5/5 to 1/5
