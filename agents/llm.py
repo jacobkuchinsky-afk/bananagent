@@ -1,9 +1,9 @@
-"""Drives Stagehand from a local Ollama model.
+"""Drives Stagehand from the same model the main assistant uses.
 
 Stagehand will take a plain async callback in place of a hosted provider, which
 is the whole reason this works without an API key: it hands us messages and a
 JSON schema, we hand back an answer, and it never learns the model isn't
-OpenAI's. Nothing leaves the machine.
+OpenAI's.
 
 Two shapes come through. Structured calls carry a JSON schema and are how
 Stagehand does its real work — deciding which element to click, pulling fields
@@ -11,9 +11,10 @@ off a page — so those go to Ollama with `format` set to the schema, which
 constrains decoding rather than hoping the model returns valid JSON. Plain
 message calls are the fallback and come back as text.
 
-The agent's model runs on the *system* Ollama on 11434, not the pinned 0.20.7
-on 11435. That copy exists only because old Ollama can still hear speech; it is
-two years behind on everything else, and a 27B tool-caller has no business on it.
+Every request goes to the Spark (config.OLLAMA_HOST) with config.MODEL — only
+the system prompt differs (agents/browser.md). num_ctx and keep_alive are the
+main assistant's too: a different num_ctx makes Ollama reload the model, and a
+shorter keep_alive would unload it out from under the main assistant.
 """
 
 import json
@@ -23,67 +24,39 @@ import ollama
 import config
 
 _client = None
-_resolved = None
 
 
 def client():
     global _client
     if _client is None:
-        _client = ollama.AsyncClient(host=config.AGENT_OLLAMA_HOST)
+        _client = ollama.AsyncClient(host=config.OLLAMA_HOST)
     return _client
 
 
 def resolve_model():
-    """The configured model if it's pulled, else the closest thing installed.
-
-    Same bargain brain.py makes: a half-finished `ollama pull` should leave the
-    agent slower, not dead.
-    """
-    global _resolved
-    if _resolved:
-        return _resolved
-
-    want = config.AGENT_MODEL
-    try:
-        listed = ollama.Client(host=config.AGENT_OLLAMA_HOST).list().get("models", [])
-        names = [m.get("model") or m.get("name") for m in listed]
-        names = [n for n in names if n]
-    except Exception as e:
-        raise RuntimeError(
-            f"The agent's Ollama ({config.AGENT_OLLAMA_HOST}) isn't reachable: {e}")
-
-    if want in names:
-        _resolved = want
-        return _resolved
-
-    # Never fall back onto a hosted model. The point of this agent is that the
-    # pages it reads — forms, accounts, whatever you're logged into — stay on
-    # this machine, and a ':...-cloud' tag would quietly ship them off it.
-    local = [n for n in names if not n.endswith("-cloud")]
-    stem = want.split(":")[0]
-    family = stem.split(".")[0]
-    pick = (next((n for n in local if n.startswith(stem)), None)
-            or next((n for n in local if n.startswith(family)), None))
-    if pick is None:
-        raise RuntimeError(
-            f"'{want}' isn't pulled and no local substitute is installed. "
-            f"Run: ollama pull {want}")
-    print(f"[browser] '{want}' isn't pulled — driving with local '{pick}' instead")
-    _resolved = pick
-    return _resolved
+    return config.MODEL
 
 
-def available():
-    """Is there a model to drive with? Used for the dashboard's status line."""
-    try:
-        return resolve_model()
-    except Exception:
-        return None
+def options():
+    """Ollama options for an agent request: the main assistant's context size,
+    the agent's own temperature."""
+    return {**config.AGENT_OPTIONS, "num_ctx": config.NUM_CTX}
 
 
 # -- translation -------------------------------------------------------------
+def _unwrap(value):
+    """Stagehand wraps content in pydantic RootModels; the real block is `.root`."""
+    while hasattr(value, "root") and not hasattr(value, "type"):
+        value = value.root
+    return value
+
+
 def _blocks(content):
-    return content if isinstance(content, list) else [content]
+    content = _unwrap(content)
+    if isinstance(content, str):
+        return [content]
+    items = content if isinstance(content, list) else [content]
+    return [_unwrap(block) for block in items]
 
 
 def _to_ollama(messages, system_prompt):
@@ -100,7 +73,7 @@ def _to_ollama(messages, system_prompt):
                 data = getattr(block, "data", "") or ""
                 images.append(data.split(",", 1)[-1] if data.startswith("data:") else data)
             else:
-                piece = getattr(block, "text", None)
+                piece = block if isinstance(block, str) else getattr(block, "text", None)
                 if piece:
                     text.append(piece)
         turn = {"role": str(getattr(message.role, "value", message.role)),
@@ -112,12 +85,12 @@ def _to_ollama(messages, system_prompt):
 
 
 def _options(params):
-    options = dict(config.AGENT_OPTIONS)
+    opts = options()
     if getattr(params, "temperature", None) is not None:
-        options["temperature"] = params.temperature
+        opts["temperature"] = params.temperature
     if getattr(params, "stop_sequences", None):
-        options["stop"] = list(params.stop_sequences)
-    return options
+        opts["stop"] = list(params.stop_sequences)
+    return opts
 
 
 def _schema_of(params):
@@ -187,7 +160,7 @@ async def generate(params):
         "model": resolve_model(),
         "messages": _to_ollama(params.messages, getattr(params, "system_prompt", None)),
         "options": _options(params),
-        "keep_alive": config.AGENT_KEEP_ALIVE,
+        "keep_alive": config.KEEP_ALIVE,
         "think": config.AGENT_THINK,
     }
     if structured:

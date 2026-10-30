@@ -1,14 +1,13 @@
-"""Endpoints for the assistant itself — its window, its mic, its model server.
+"""Endpoints for the assistant itself — its window and its settings.
 
 Anything the app can do to itself is reachable here, so "make the orb blue" or
-"which microphone are you using" are answerable without touching the code.
+"what's the hotkey" are answerable without touching the code.
 """
 
 import os
 import time
 
 import config
-import recorder as recorder_mod
 import water
 from .registry import MAJOR, MINOR, app, endpoint, on_ui, param
 
@@ -26,23 +25,19 @@ def _here(name):
 @endpoint(
     tier=MINOR,
     description=(
-        "Reports the assistant's own runtime state: which language model it is "
-        "using, which Ollama server and version answer its requests, how long it "
-        "has been running, and which microphone it is listening to."
+        "Reports the assistant's own runtime state: how long it has been "
+        "running, its hotkey, whether the text box is open, and how many "
+        "messages it has been sent."
     ),
-    returns="An object with model, ollama_host, ollama_version, uptime_seconds, microphone.",
+    returns="An object with uptime_seconds, hotkey, box_open and messages.",
 )
 def app_status():
-    import brain
-
     a = app()
     return {
-        "model": brain.resolve_model(),
-        "ollama_host": config.OLLAMA_HOST,
-        "ollama_version": brain.server_version() or "not responding",
         "uptime_seconds": round(time.time() - _STARTED, 1),
-        "microphone": _device_name(a.rec.device),
         "hotkey": config.HOTKEY,
+        "box_open": a.ui.state == a.ui.TYPING,
+        "messages": a.turns,
     }
 
 
@@ -67,25 +62,6 @@ def app_list_endpoints():
         "actions_i_can_perform": [brief(e) for e in by_tier(MAJOR)],
         "things_i_can_look_up": [brief(e) for e in by_tier(MINOR)],
     }
-
-
-@endpoint(
-    tier=MINOR,
-    description=(
-        "Lists the microphones this computer exposes, with the index and host "
-        "audio API of each. Use before changing the input device."
-    ),
-    returns="A list of objects with index, name and sample_rate.",
-)
-def app_list_microphones():
-    import sounddevice as sd
-
-    out = []
-    for i, d in enumerate(sd.query_devices()):
-        if d["max_input_channels"] > 0:
-            out.append({"index": i, "name": d["name"],
-                        "sample_rate": int(d["default_samplerate"])})
-    return out
 
 
 @endpoint(
@@ -122,7 +98,7 @@ def app_recent_log(lines=25):
     tier=MINOR,
     description=(
         "Reads one of the assistant's configuration values by name, for example "
-        "HOTKEY, ORB_RADIUS, CORNER or SILENCE_PEAK. Names are case insensitive."
+        "HOTKEY, ORB_RADIUS, CORNER or OPACITY. Names are case insensitive."
     ),
     params={"name": param("string", "The setting to read.", required=True)},
     returns="The setting's current value, or an error naming the valid settings.",
@@ -151,6 +127,22 @@ def app_quit():
     a = app()
     a.ui.root.after(400, a.ui.root.quit)
     return "Shutting down."
+
+
+@endpoint(
+    tier=MAJOR,
+    description=(
+        "Restarts the assistant: it shuts down and immediately starts again, "
+        "picking up changes to its code and to settings that say they apply on "
+        "restart. The conversation survives. Call this when asked to restart "
+        "or reload."
+    ),
+)
+def app_restart():
+    a = app()
+    # A beat's delay so this reply gets to finish before the window goes.
+    a.ui.root.after(400, a.restart)
+    return "Restarting."
 
 
 @endpoint(
@@ -208,7 +200,7 @@ def app_set_orb_color(color):
     key = str(color).strip().lower()
     if key not in schemes:
         raise ValueError(f"Unknown color '{color}'. Choose from: {', '.join(schemes)}")
-    for state in ("listening", "thinking", "answering"):
+    for state in ("typing", "thinking", "answering"):
         water.PALETTES[state] = schemes[key]
     return f"Orb is now {key}."
 
@@ -251,25 +243,8 @@ def app_set_orb_size(radius):
 @endpoint(
     tier=MAJOR,
     description=(
-        "Switches which microphone the assistant records from. Match by name, for "
-        "example 'Microphone Array' or 'Realtek'. Call app_list_microphones first "
-        "if unsure. Takes effect on the next recording."
-    ),
-    params={"name": param("string", "Part of the device name, case insensitive.", required=True)},
-)
-def app_set_microphone(name):
-    config.INPUT_DEVICE_NAME = str(name)
-    config.INPUT_DEVICE = None
-    a = app()
-    a.rec.device = recorder_mod.resolve_device()
-    return f"Now recording from: {_device_name(a.rec.device)}"
-
-
-@endpoint(
-    tier=MAJOR,
-    description=(
-        "Controls whether the push-to-talk key is swallowed. When on, holding the "
-        "key never types its character into other programs. Turn it off if you "
+        "Controls whether the hotkey is swallowed. When on, pressing the key "
+        "never types its character into other programs. Turn it off if you "
         "need to type that character normally."
     ),
     params={"enabled": param("boolean", "True to swallow the key.", required=True)},
@@ -278,26 +253,3 @@ def app_set_hotkey_suppression(enabled):
     config.SUPPRESS_HOTKEY = bool(enabled)
     state = "swallowed" if config.SUPPRESS_HOTKEY else "passed through"
     return f"The {config.HOTKEY} key will be {state}; restart to apply."
-
-
-@endpoint(
-    tier=MAJOR,
-    description=(
-        "Restarts the local model server. Use when the assistant has stopped "
-        "answering or replies are failing, since the audio model occasionally "
-        "locks up. Takes about fifteen seconds to reload afterwards."
-    ),
-)
-def app_restart_model_server():
-    import brain
-
-    return f"Model server restarted, now running {brain.restart_server()}."
-
-
-def _device_name(index):
-    try:
-        import sounddevice as sd
-
-        return sd.query_devices(index, "input")["name"]
-    except Exception:
-        return "system default"

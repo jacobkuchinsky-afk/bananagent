@@ -2,16 +2,20 @@
 # which is why the project ships its own venv:
 #   py -3.13 -m venv .venv
 #   .venv\Scripts\python.exe -m pip install -r requirements.txt
-sounddevice==0.5.5   # mic capture (bundles PortAudio; PyAudio has no 3.13 wheel)
-keyboard==0.13.5     # global push-to-talk hotkey
-ollama==0.6.2        # local model client
-numpy==2.5.2         # audio buffers and resampling
+keyboard==0.13.5     # global hotkey that pops the text box
+ollama==0.6.2        # the browsing agent's model client
+httpx==0.28.1        # streams replies from the Spark's Ollama (brain.py)
+ddgs==9.16.0         # web_search: search engines' results pages, no API key
+numpy==2.5.2         # antialiased drawing for the dashboard and icon
 pycaw==20251023      # exact volume control for the set_volume endpoint
 comtypes==1.4.16     # pycaw's COM bindings
-# Local text-to-speech. Pulls onnxruntime and a bundled espeak-ng, not torch.
-# The weights are downloaded separately — see the README.
-kokoro-onnx==0.5.0
 # The browsing agent. Drives Chrome over CDP directly — no Playwright, no Node,
 # and no Browserbase account: the LLM is a local callback and the browser is the
 # Chrome you already have.
 stagehand==4.0.1
+# Outside platforms (integrations/): Google's OAuth sign-in for Classroom, and
+# the authorized HTTP session its API calls go through
+google-auth-oauthlib==1.5.0
+google-auth==2.62.0
+# Texting BananaGent on Discord (integrations/discord_bot.py): the bot account
+discord.py==2.7.1

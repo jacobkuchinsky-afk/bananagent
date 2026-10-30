@@ -38,7 +38,9 @@ def _mixer():
     tier=MINOR,
     description=(
         "Returns the current local date and time on this computer, including the "
-        "day of the week. Use this for any question about what time or day it is."
+        "day of the week. The stamp on the user's latest message already gives the "
+        "time it was sent; use this when you need it to the second right now, "
+        "such as partway through a long job."
     ),
     returns="An object with iso, time_12h, date, weekday.",
 )

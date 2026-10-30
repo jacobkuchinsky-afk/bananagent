@@ -1,4 +1,4 @@
-"""The dashboard window: a side nav, and a Diagnostics page about the model.
+"""The dashboard window: a side nav, a Diagnostics page, and the agents.
 
 It exists from the moment the app starts but sits minimized, so logging in
 doesn't throw a window in your face — click its taskbar button (the banana) to
@@ -17,24 +17,34 @@ the window is minimized.
 """
 
 import ctypes
+import json
 import math
+import os
 import re
+import shutil
 import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
 
 import agents
+import agents.browser
+import business
 import config
 import diagnostics
 import endpoints
 import icon
+import memory
 import paint
+import prompts
+import richtext
+import subagents
 
 # -- palette -----------------------------------------------------------------
 PAGE = "#fff3ce"      # the window behind everything
 NAV = "#ffc93c"       # the side bar, same yellow as the orb
 CARD = "#ffffff"
+NOTICE_BG = "#f4ecd6"  # an agent reporting back, in the chat
 INK = "#101010"
 MUTED = "#7d7059"
 ACCENT = "#e8a317"    # gauge arcs and the sparkline, against white
@@ -42,12 +52,14 @@ LABEL = "#96660a"     # the same amber darkened until it's readable as text
 TRACK = "#f0e2b6"     # the unfilled part of a gauge
 GOOD = "#1f9254"
 BAD = "#c0392b"
+CODE = "#5a4f3c"      # a tool call's arguments: darker than MUTED, quieter than INK
 
 RADIUS = 22           # the corner radius everything shares
 SHADOW = 5            # how far the hard black shadow sits behind a panel
 OUTLINE = 2.4
 
-PAGES = [("diagnostics", "Diagnostics"), ("agents", "Agents")]
+PAGES = [("chat", "Chat"), ("diagnostics", "Diagnostics"), ("agents", "Agents"),
+         ("prompts", "Prompts")]
 
 STATUS_COLORS = {
     "idle": "#b9ac8e", "working": ACCENT, "waiting": "#d97a0b",
@@ -57,6 +69,28 @@ STATUS_COLORS = {
 
 def _ease(t):
     return 1 - (1 - t) ** 3
+
+
+def text_box(px, w, h, cap_w):
+    """The white text-box panel with its yellow Enter key-cap.
+
+    Shared by the overlay's ` box and the Chat tab so the two can't drift
+    apart. Returns the sheet and how far the drawing is inset to leave room
+    for the shadow, which is what to subtract when placing it.
+    """
+    pad = px(SHADOW) + 3
+    off = px(SHADOW)
+    r = px(14)
+    s = paint.Sheet(w + pad * 2, h + pad * 2)
+    body = paint.rounded_rect(s, pad, pad, w, h, r)
+    s.fill(paint.rounded_rect(s, pad + off, pad + off, w, h, r), INK)
+    s.fill(body, CARD)
+    m = px(7)
+    cap = paint.rounded_rect(s, pad + w - m - cap_w, pad + m, cap_w, h - 2 * m, px(8))
+    s.fill(cap, NAV)
+    s.stroke(cap, INK, px(1.8))
+    s.stroke(body, INK, px(OUTLINE))
+    return s, pad
 
 
 class Dashboard:
@@ -94,7 +128,11 @@ class Dashboard:
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Motion>", self._on_move)
         self.canvas.bind("<Button-1>", self._on_click)
-        self.canvas.bind("<Leave>", lambda _e: self._set_hover(None))
+        self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<Leave>", self._on_leave)
+        # On the window, not the canvas: Tk on Windows delivers the wheel to
+        # whatever has focus, which on the Chat tab is its text box.
+        self.win.bind("<MouseWheel>", self._on_wheel)
 
         self._fonts()
         self._build()
@@ -122,6 +160,7 @@ class Dashboard:
         self.win.deiconify()
         self.win.lift()
         self.win.focus_force()
+        self._focus_page()
         return True
 
     def _on_map(self, _event=None):
@@ -133,6 +172,14 @@ class Dashboard:
         self._decorate()
         self._relayout(force=True)
         self._shown_at = time.perf_counter()  # replay the entrance
+        self._focus_page()
+
+    def _focus_page(self):
+        """Opening onto the Chat tab means you're about to type, so be ready."""
+        if self.page == "chat":
+            self.chat_page.focus()
+        elif self.page == "prompts":
+            self.prompts_page.focus()
 
     def hide(self):
         self.win.iconify()
@@ -147,6 +194,7 @@ class Dashboard:
             raise ValueError(f"No page called '{page}'. Pages: {', '.join(names)}")
         self.page = page
         self._shown_at = time.perf_counter()
+        self._focus_page()
         return page
 
     def refresh(self):
@@ -175,6 +223,16 @@ class Dashboard:
         self.f_num = f(15, "bold", "Consolas")
         self.f_gauge = f(19, "bold", "Consolas")
         self.f_mono = f(11, "bold", "Consolas")  # endpoint signatures
+        self.f_chat = f(13)                           # message bubbles
+        self.f_input = f(14, "normal", "Segoe UI Semibold")  # what you're typing
+        # A tool call's line in the chat, and its arguments when opened.
+        self.f_tool = tkfont.Font(family="Segoe UI", size=-self._px(12), slant="italic")
+        self.f_code = f(11, "normal", "Consolas")
+        self.f_tab = f(12, "bold")
+        # The Prompts tab's editor, and its notes and headings.
+        self.f_edit = f(13, "normal", "Consolas")
+        self.f_edit_bold = f(13, "bold", "Consolas")
+        self.f_edit_note = tkfont.Font(family="Consolas", size=-self._px(13), slant="italic")
 
     def _decorate(self):
         """Paint the title bar to match, and give the window the banana.
@@ -218,6 +276,11 @@ class Dashboard:
 
         self.nav_hint = c.create_text(0, 0, anchor="nw", text="", font=self.f_label,
                                       fill=INK, justify="left")
+        self.restart_bg = c.create_image(0, 0, anchor="nw")
+        self.restart_text = c.create_text(0, 0, anchor="center", text="↻  Restart",
+                                          font=self.f_value, fill=INK)
+        self.restart_box = (0, 0, 0, 0)
+        self._restarting = False
         self.status_dot = c.create_image(0, 0, anchor="nw")
         self.status_text = c.create_text(0, 0, anchor="w", text="", font=self.f_small, fill=INK)
 
@@ -229,10 +292,12 @@ class Dashboard:
             "model": Card(self, "THE MODEL", rows=5, hero=True),
             "residency": Card(self, "WHERE IT IS RUNNING", rows=0, gauges=2),
             "server": Card(self, "MODEL SERVER", rows=5),
-            "audio": Card(self, "VOICE IN AND OUT", rows=5),
+            "box": Card(self, "CONVERSATION AND MEMORY", rows=5),
             "activity": Card(self, "THIS SESSION", rows=0, spark=True, stats=3),
         }
         self.rows = [AgentRow(self, a) for a in agents.all_agents()]
+        self.chat_page = ChatPage(self)
+        self.prompts_page = PromptsPage(self)
 
     # -- layout --------------------------------------------------------------
     def _relayout(self, force=False):
@@ -267,10 +332,16 @@ class Dashboard:
             self.canvas.coords(item, x + self._px(44), y + item_h / 2)
 
         hint_y = h - m - self._px(96)
+        # Restart sits just above the hint, the width of the page buttons.
+        rx, rh = m + self._px(20), self._px(38)
+        rw, ry = nav_w - self._px(40), hint_y - rh - self._px(22)
+        self._panel(self.restart_bg, rx, ry, rw, rh, CARD, radius=12)
+        self.canvas.coords(self.restart_text, rx + rw / 2, ry + rh / 2)
+        self.restart_box = (rx, ry, rw, rh)
         self.canvas.coords(self.nav_hint, m + self._px(22), hint_y)
         self.canvas.itemconfig(
             self.nav_hint,
-            text=f"Hold  {config.HOTKEY}  and talk.\nEsc hides this window.",
+            text=f"Press  {config.HOTKEY}  and type.\nEsc hides this window.",
             width=nav_w - self._px(44))
         self.canvas.coords(self.status_dot, m + self._px(22), h - m - self._px(34))
         self.canvas.coords(self.status_text, m + self._px(44), h - m - self._px(26))
@@ -287,7 +358,7 @@ class Dashboard:
         self.cards["residency"].place(x0 + col + gap, top, col, rows[0])
         y = top + rows[0] + gap
         self.cards["server"].place(x0, y, col, rows[1])
-        self.cards["audio"].place(x0 + col + gap, y, col, rows[1])
+        self.cards["box"].place(x0 + col + gap, y, col, rows[1])
         self.cards["activity"].place(x0, y + rows[1] + gap, cw, rows[2])
 
         self.content = (x0, top, cw, h - top - m)
@@ -388,18 +459,31 @@ class Dashboard:
 
     def _draw_page(self, now):
         entry = _ease(min(1.0, (now - self._shown_at) / 0.55)) if self._shown_at else 1.0
-        showing_agents = self.page == "agents"
-        self.canvas.itemconfig(self.title, text="Agents" if showing_agents else "Diagnostics")
+        self.canvas.itemconfig(self.title, text=dict(PAGES)[self.page])
 
         for card in self.cards.values():
-            card.set_visible(not showing_agents)
+            card.set_visible(self.page == "diagnostics")
         for row in self.rows:
-            row.set_visible(showing_agents)
+            row.set_visible(self.page == "agents")
+        self.chat_page.set_visible(self.page == "chat")
+        self.prompts_page.set_visible(self.page == "prompts")
 
-        if showing_agents:
+        if self.page == "chat":
+            self._draw_chat(now)
+        elif self.page == "prompts":
+            self.prompts_page.draw(now)
+        elif self.page == "agents":
             self._draw_agents(now, entry)
         else:
             self._draw_diagnostics(now, entry)
+
+    def _draw_chat(self, now):
+        sent = sum(1 for m in self.app.chat if m["role"] == "you")
+        self.canvas.itemconfig(
+            self.subtitle,
+            text=f"{sent} message{'' if sent == 1 else 's'}  ·  "
+                 f"the same conversation as the  {config.HOTKEY}  box")
+        self.chat_page.draw(now)
 
     def _draw_agents(self, now, entry):
         busy = [a for a in agents.all_agents() if a.status in agents.LIVE]
@@ -443,28 +527,28 @@ class Dashboard:
             (self._ease_to("gpu", (on_gpu or 0) / 100.0), "ON GPU",
              f"{int(self._ease_to('gpu', (on_gpu or 0) / 100.0) * 100)}%" if loaded["resident"] else "—",
              ACCENT),
-            (self._ease_to("ram", (machine["ram_used_percent"] or 0) / 100.0), "SYSTEM RAM",
+            (self._ease_to("ram", (machine["ram_used_percent"] or 0) / 100.0), "THIS PC'S RAM",
              f"{int(self._ease_to('ram', (machine['ram_used_percent'] or 0) / 100.0) * 100)}%",
              GOOD if (machine["ram_used_percent"] or 0) < 90 else BAD),
-        ], caption=(f"{_gb(loaded['vram_gb'])} of {_gb(loaded['size_gb'])} on "
-                    f"{_card_name(machine['gpu'])}"
+        ], caption=(f"{_gb(loaded['vram_gb'])} of {_gb(loaded['size_gb'])} on the DGX Spark's GPU"
                     if loaded["resident"] else "the model is not loaded right now"))
 
         c["server"].update(entry, 2, rows=[
             ("address", server["host"].replace("http://", "")),
             ("version", _or(server["version"], "not answering")),
-            ("which one", "pinned copy, 0.20.7" if server["pinned"] else "system install"),
+            ("machine", "DGX Spark"),
             ("model loaded", "yes" if loaded["resident"] else "no"),
-            ("unloads in", _dur(loaded["unloads_in_seconds"]) if loaded["resident"] else "—"),
+            ("unloads in", _unloads(loaded)),
         ])
 
-        speech = d["speech"]
-        c["audio"].update(entry, 3, rows=[
-            ("microphone", _clip(_mic_name(app["microphone"]), 24)),
-            ("push to talk", f"hold  {app['hotkey']}"),
-            ("speaks as", speech["voice"] if speech["ready"] else "—"),
-            ("speaking rate", f"{speech['speed']}x" if speech["ready"] else "—"),
-            ("state", _voice_state(app, speech)),
+        c["box"].update(entry, 3, rows=[
+            ("open with", f"press  {app['hotkey']}"),
+            ("state", "open" if app["box_open"] else "put away"),
+            ("last message", _clip(app["last_message"] or "—", 24)),
+            ("short-term", f"{app['short_term_tokens']:,} of {config.SHORT_TERM_TOKENS:,} tokens"
+             if app["short_term_tokens"] is not None else "—"),
+            ("long-term", f"{app['long_term_facts']} saved facts"
+             if app["long_term_facts"] is not None else "—"),
         ])
 
         replies = app["recent_reply_seconds"]
@@ -485,20 +569,70 @@ class Dashboard:
         if index != self._hover:
             self._hover = index
 
+    def _hit_restart(self, x, y):
+        rx, ry, rw, rh = self.restart_box
+        return rx <= x <= rx + rw and ry <= y <= ry + rh
+
+    def restart(self):
+        """The nav's Restart button: say so, then let the app quit and relaunch."""
+        if self._restarting:
+            return
+        self._restarting = True
+        self.canvas.itemconfig(self.restart_text, text="Restarting…")
+        # A moment for the label to reach the screen before the window goes.
+        self.win.after(150, self.app.restart)
+
     def _clickable(self, x, y):
-        if self._hit(x, y) is not None:
+        if self._hit(x, y) is not None or self._hit_restart(x, y):
             return True
+        if self.page == "chat":
+            return (self.chat_page.hit_send(x, y) or self.chat_page.hit_tool(x, y) is not None
+                    or self.chat_page.hit_rich(x, y) is not None)
+        if self.page == "prompts":
+            return self.prompts_page.hit(x, y) is not None
         return self.page == "agents" and any(r.hit(x, y) for r in self.rows)
+
+    def _on_wheel(self, event):
+        if self.page == "chat":
+            self.chat_page.wheel(event.delta)
+        elif self.page == "prompts":
+            self.prompts_page.wheel(event.delta)
 
     def _on_move(self, event):
         self._set_hover(self._hit(event.x, event.y))
+        if self.page == "chat":
+            self.chat_page.pointer = (event.x, event.y)
         self.canvas.configure(
             cursor="hand2" if self._clickable(event.x, event.y) else "")
+
+    def _on_leave(self, _event=None):
+        self._set_hover(None)
+        self.chat_page.pointer = None
+
+    def _on_right_click(self, event):
+        if self.page == "chat":
+            self.chat_page.right_click(event.x, event.y)
 
     def _on_click(self, event):
         hit = self._hit(event.x, event.y)
         if hit is not None:
             return self.select(PAGES[hit][0])
+        if self._hit_restart(event.x, event.y):
+            return self.restart()
+        if self.page == "chat":
+            # The key-cap sends, a tool line opens or closes its arguments, a
+            # link or button in a reply does its thing, and a click anywhere
+            # else on the page just puts you back in the box.
+            if self.chat_page.hit_send(event.x, event.y):
+                return self.chat_page.send()
+            if self.chat_page.click_rich(event.x, event.y):
+                return self.chat_page.focus()
+            tool = self.chat_page.hit_tool(event.x, event.y)
+            if tool is not None:
+                self.chat_page.toggle_tool(tool)
+            return self.chat_page.focus()
+        if self.page == "prompts":
+            return self.prompts_page.click(event.x, event.y)
         if self.page != "agents":
             return
         for row in self.rows:
@@ -524,12 +658,848 @@ class Dashboard:
             time.sleep(1.5 if self.visible() else 10.0)
 
 
+class ChatPage:
+    """The Chat tab: the conversation so far, and a box to add to it.
+
+    It's the same conversation as the ` box — both go through App.send() — so
+    a message typed in the corner shows up here too, with its reply. Newest is
+    at the bottom and the wheel scrolls back. Tk's canvas can't clip, so two
+    flat page-coloured masks hide bubbles as they scroll up under the title or
+    down under the box.
+    """
+
+    BOX_H = 48      # the text box
+    CAP = 34        # its Enter key-cap, which is also the send button
+    GAP = 14        # between bubbles
+    PAD_X, PAD_Y = 16, 10
+
+    def __init__(self, dash):
+        self.d = dash
+        c = dash.canvas
+        self._items = {}      # block key -> its canvas items, made as blocks first appear
+        self._measured = {}   # canvas text item -> (text, wrap, width, height)
+        self._tool_hits = []  # (x0, y0, x1, y1, part) for each tool line on screen
+        self._rich = []       # the replies on screen, as RichText, for their links and buttons
+        self.fonts = richtext.Fonts(dash._px)
+        self._photos = {}     # button pills and code panels, shared by every reply
+        self.pointer = None   # where the mouse is, for the tooltip
+        self._note = None     # (text, x, y, until): something a click has to say
+        self.scroll = 0.0     # pixels scrolled back from the newest message
+        self._seen = 0        # entries last frame, to notice new ones arriving
+        self._panel_size = None
+        self._pad = 0
+        self.send_box = (0, 0, 0, 0)
+
+        self.empty = c.create_text(
+            0, 0, anchor="center", justify="center", font=dash.f_label, fill=MUTED,
+            text=f"Nothing said yet.\nType below, or press  {config.HOTKEY}  anywhere "
+                 f"— it's the same conversation.")
+        self.mask_top = c.create_rectangle(0, 0, 0, 0, fill=PAGE, outline="")
+        self.mask_bottom = c.create_rectangle(0, 0, 0, 0, fill=PAGE, outline="")
+        self.panel = c.create_image(0, 0, anchor="nw")
+        self.cap = c.create_text(0, 0, anchor="center", text="↵", font=dash.f_value, fill=INK)
+
+        self.var = tk.StringVar()
+        self.entry = tk.Entry(
+            c, textvariable=self.var, font=dash.f_input,
+            bg=CARD, fg=INK, insertbackground=INK, insertwidth=dash._px(2),
+            relief="flat", bd=0, highlightthickness=0,
+            selectbackground=NAV, selectforeground=INK)
+        self.entry.bind("<Return>", lambda _e: self.send() or "break")
+        self.entry_item = c.create_window(0, 0, anchor="w", window=self.entry)
+
+        # Placeholder laid over the empty box rather than typed into it, same
+        # as the overlay's, so it can never be sent.
+        self.hint = tk.Label(self.entry, text="Message BananaGent…", font=dash.f_input,
+                             bg=CARD, fg=MUTED, bd=0, padx=0, pady=0)
+        self.hint.bind("<Button-1>", lambda _e: self.focus())
+        self.var.trace_add("write", lambda *_: self._update_hint())
+        self._update_hint()
+
+        # What a link or button does, shown while the pointer is over it.
+        self.tip_bg = c.create_image(0, 0, anchor="nw", state="hidden")
+        self.tip = c.create_text(0, 0, anchor="nw", font=dash.f_code, fill=CARD,
+                                 state="hidden")
+        self._tip_size = None
+
+    # -- input ----------------------------------------------------------------
+    def send(self):
+        text = self.var.get().strip()
+        if text:
+            self.var.set("")
+            self.d.app.send(text, "chat")
+        self.focus()
+
+    def focus(self):
+        self.entry.focus_set()
+
+    def wheel(self, delta):
+        self.scroll += delta / 120 * self.d._px(60)
+
+    def hit_send(self, px, py):
+        x, y, w, h = self.send_box
+        return x <= px <= x + w and y <= py <= y + h
+
+    def hit_tool(self, px, py):
+        """The tool call whose line is under the pointer, if any."""
+        for x0, y0, x1, y1, part in self._tool_hits:
+            if x0 <= px <= x1 and y0 <= py <= y1:
+                return part
+        return None
+
+    def toggle_tool(self, part):
+        part["open"] = not part.get("open")
+
+    def hit_rich(self, px, py):
+        """The link or button in a reply under the pointer: (view, action, tip, rect)."""
+        for view in self._rich:
+            got = view.hit(px, py)
+            if got:
+                return (view,) + got
+        return None
+
+    def click_rich(self, px, py):
+        """Do what a click on a link or button means. False if there wasn't one."""
+        got = self.hit_rich(px, py)
+        if not got:
+            return False
+        view, action, _tip, rect = got
+        try:
+            said = view.act(action)
+        except Exception as e:
+            said = f"Couldn't do that: {e}"
+        if isinstance(said, tuple) and said[0] == "send":
+            self.d.app.send(said[1], "chat")
+        elif said:
+            self._note = (said, rect[0], rect[3], time.time() + 3.0)
+        return True
+
+    def right_click(self, px, py):
+        """A file link's right-click shows it in Explorer."""
+        got = self.hit_rich(px, py)
+        if not got:
+            return
+        view, action, _tip, rect = got
+        try:
+            said = view.reveal(action)
+        except Exception as e:
+            said = f"Couldn't do that: {e}"
+        if said:
+            self._note = (said, rect[0], rect[3], time.time() + 3.0)
+
+    def _update_hint(self):
+        if self.var.get():
+            self.hint.place_forget()
+        else:
+            self.hint.place(x=self.d._px(5), rely=0.5, anchor="w")  # clear of the caret
+
+    # -- drawing --------------------------------------------------------------
+    def set_visible(self, on):
+        c = self.d.canvas
+        state = "normal" if on else "hidden"
+        for item in (self.mask_top, self.mask_bottom, self.panel, self.cap, self.entry_item):
+            c.itemconfig(item, state=state)
+        if not on:
+            c.itemconfig(self.empty, state="hidden")
+            for items in self._items.values():
+                for item in items:
+                    if isinstance(item, richtext.RichText):
+                        item.show(False)
+                    else:
+                        c.itemconfig(item, state="hidden")
+            for item in (self.tip, self.tip_bg):
+                c.itemconfig(item, state="hidden")
+            self._tool_hits, self._rich = [], []
+
+    def _blocks(self, chat, now):
+        """The conversation as things to draw, oldest first.
+
+        A message is one bubble. A reply is its parts in the order they
+        happened — a bubble per stretch of text, a grey line per tool call —
+        plus dots while it's waiting on the model. Keys stay stable while a
+        reply streams, so each block keeps its canvas items.
+        """
+        for i, msg in enumerate(chat):
+            if msg["role"] == "you":
+                yield ("you", i), "bubble", (msg["text"], True, NAV)
+                continue
+            if msg["role"] == "notice":
+                # An agent reporting back — the model's reply follows it.
+                yield ("notice", i), "bubble", ("↳ " + msg["text"], False, NOTICE_BG)
+                continue
+            if msg.get("error"):
+                yield ("error", i), "bubble", (msg["text"], False, "#ffd5cf")
+                continue
+            parts = msg.get("parts") or []
+            texts = [j for j, p in enumerate(parts) if p["kind"] == "text" and p["text"].strip()]
+            for j, part in enumerate(parts):
+                if part["kind"] == "tool":
+                    yield ("tool", i, j), "tool", part
+                elif part["text"].strip():
+                    text = part["text"].strip()
+                    if msg.get("cut") and j == texts[-1]:
+                        text += " …"
+                    # Replies are markdown, with links, buttons and math in them.
+                    yield ("text", i, j), "rich", (text, False, CARD)
+            idle = not parts or (parts[-1]["kind"] == "tool" and parts[-1]["status"] != "running")
+            if not msg.get("done") and idle:
+                yield ("dots", i), "bubble", ("•" * (1 + int(now * 3) % 3), False, CARD)
+            elif msg.get("cut") and not texts:
+                yield ("cut", i), "bubble", ("(cut off)", False, CARD)
+
+    def _get(self, key, kind):
+        """A block's canvas items, made the first time it's drawn."""
+        if key not in self._items:
+            d, c = self.d, self.d.canvas
+            if kind == "bubble":
+                self._items[key] = (c.create_image(0, 0, anchor="nw"),
+                                    c.create_text(0, 0, anchor="nw", font=d.f_chat, fill=INK))
+            elif kind == "rich":
+                self._items[key] = (c.create_image(0, 0, anchor="nw"),
+                                    richtext.RichText(c, self.fonts, self._photos))
+            else:
+                # The line, the opened box with its arguments and the run's
+                # activity, and the status pill beside the line.
+                self._items[key] = (c.create_text(0, 0, anchor="nw", font=d.f_tool, fill=MUTED),
+                                    c.create_image(0, 0, anchor="nw"),
+                                    c.create_text(0, 0, anchor="nw", font=d.f_code, fill=CODE),
+                                    c.create_text(0, 0, anchor="nw", font=d.f_code, fill=INK),
+                                    c.create_image(0, 0, anchor="nw"),
+                                    c.create_text(0, 0, anchor="w", font=d.f_small))
+        return self._items[key]
+
+    def draw(self, now):
+        d, c = self.d, self.d.canvas
+        if not hasattr(d, "content"):
+            return  # not laid out yet
+        chat = d.app.chat
+        x, y, w, h = d.content
+        shadow = d._px(SHADOW)
+        box_h = d._px(self.BOX_H)
+        box_top = y + h - box_h - shadow
+        list_top, list_bottom = y, box_top - d._px(20)
+
+        if len(chat) != self._seen:
+            self._seen = len(chat)
+            self.scroll = 0.0  # something new arrived: follow it down
+
+        # Newest first, stacking upward from just above the box.
+        pad_x, pad_y = d._px(self.PAD_X), d._px(self.PAD_Y)
+        wrap = int(min(w * 0.7, d._px(620))) - 2 * pad_x
+        # Replies get more room: code blocks and tables need it.
+        rich_wrap = int(min(w * 0.84, d._px(760))) - 2 * pad_x
+        # Room under the newest bubble for its shadow, or the mask clips it.
+        cursor = list_bottom - shadow - d._px(2) + self.scroll
+        used, self._tool_hits, self._rich = set(), [], []
+        for key, kind, data in reversed(list(self._blocks(chat, now))):
+            used.add(key)
+            if kind == "bubble":
+                top = self._draw_bubble(key, data, x, w, cursor, wrap, list_top, list_bottom)
+                cursor = top - d._px(self.GAP)
+            elif kind == "rich":
+                top = self._draw_rich(key, data, x, cursor, rich_wrap, list_top, list_bottom, now)
+                cursor = top - d._px(self.GAP)
+            else:
+                top = self._draw_tool(key, data, x, cursor, wrap, list_top, list_bottom, now)
+                cursor = top - d._px(self.GAP) // 2
+
+        # Blocks that are gone — the conversation was cleared — lose their items.
+        for key in [k for k in self._items if k not in used]:
+            for item in self._items.pop(key):
+                if isinstance(item, richtext.RichText):
+                    item.destroy()
+                    continue
+                c.delete(item)
+                self._measured.pop(item, None)
+
+        # Keep the scroll between the newest message and the oldest one.
+        total = list_bottom + self.scroll - cursor
+        room = list_bottom - list_top
+        self.scroll = max(0.0, min(self.scroll, total - room)) if total > room else 0.0
+
+        c.itemconfig(self.empty, state="hidden" if chat else "normal")
+        c.coords(self.empty, x + w / 2, (list_top + list_bottom) / 2)
+
+        right, bottom = c.winfo_width(), c.winfo_height()
+        c.coords(self.mask_top, x - shadow - 4, 0, right, list_top)
+        c.coords(self.mask_bottom, x - shadow - 4, list_bottom, right, bottom)
+        for item in (self.mask_top, self.mask_bottom, d.title, d.subtitle):
+            c.tag_raise(item)
+        self._draw_box(x, box_top, w - shadow, box_h)
+        self._draw_tip(list_top, list_bottom)
+
+    def _draw_rich(self, key, data, x, bottom, wrap, list_top, list_bottom, now):
+        """A reply bubble drawn as rich text. Bottom at `bottom`; returns its top."""
+        d = self.d
+        text, _mine, colour = data
+        bg, view = self._get(key, "rich")
+        shadow = d._px(SHADOW)
+        pad_x, pad_y = d._px(self.PAD_X), d._px(self.PAD_Y)
+        tw, th = view.layout(text, wrap, now)
+        bw, bh = tw + 2 * pad_x, th + 2 * pad_y
+        top = bottom - bh
+        size = (int(bw), int(bh), colour)
+        if d._sizes.get(bg) != size:
+            d._sizes[bg] = size
+            d._panel(bg, x, top, bw, bh, colour, radius=16)
+        d.canvas.coords(bg, x - shadow - 3, top - shadow - 3)
+        view.place(x + pad_x, top + pad_y)
+        on = top + bh + shadow > list_top and top < list_bottom
+        d.canvas.itemconfig(bg, state="normal" if on else "hidden")
+        view.show(on)
+        if on:
+            self._rich.append(view)
+        return top
+
+    def _draw_tip(self, list_top, list_bottom):
+        """The tooltip: where a link goes, what a button runs — or, for a few
+        seconds after a click, what that click had to say."""
+        d, c = self.d, self.d.canvas
+        text = anchor = None
+        if self._note and time.time() < self._note[3]:
+            text, ax, ay = self._note[0], self._note[1], self._note[2]
+            anchor = (ax, ay + d._px(6))
+        elif self.pointer and list_top <= self.pointer[1] <= list_bottom:
+            got = self.hit_rich(*self.pointer)
+            if got:
+                text = got[2]
+                anchor = (self.pointer[0] + d._px(12), got[3][3] + d._px(6))
+        if not text:
+            for item in (self.tip, self.tip_bg):
+                c.itemconfig(item, state="hidden")
+            return
+        pad = d._px(8)
+        c.itemconfig(self.tip, text=_clip(text, 600), width=d._px(420), state="normal")
+        x0, y0, x1, y1 = c.bbox(self.tip)
+        tw, th = x1 - x0 + 2 * pad, y1 - y0 + 2 * pad
+        tx, ty = anchor
+        right = c.winfo_width() - d._px(12)
+        tx = min(tx, right - tw)
+        if ty + th > list_bottom:  # no room below: put it above the thing instead
+            ty = max(list_top, ty - th - d._px(36))
+        if self._tip_size != (int(tw), int(th)):
+            self._tip_size = (int(tw), int(th))
+            s = paint.Sheet(int(tw), int(th))
+            s.fill(paint.rounded_rect(s, 0, 0, int(tw), int(th), d._px(8)), INK, alpha=0.92)
+            d._sheet(self.tip_bg, s)
+        c.coords(self.tip_bg, tx, ty)
+        c.coords(self.tip, tx + pad, ty + pad)
+        c.itemconfig(self.tip_bg, state="normal")
+        c.tag_raise(self.tip_bg)
+        c.tag_raise(self.tip)
+
+    def _draw_box(self, x, top, w, h):
+        d, c = self.d, self.d.canvas
+        cap = d._px(self.CAP)
+        if self._panel_size != (int(w), h):
+            self._panel_size = (int(w), h)
+            sheet, self._pad = text_box(d._px, int(w), h, cap)
+            d._sheet(self.panel, sheet)
+        c.coords(self.panel, x - self._pad, top - self._pad)
+        c.tag_raise(self.panel)
+        c.tag_raise(self.cap)
+
+        cy = top + h / 2
+        cap_x = x + w - d._px(7) - cap
+        c.coords(self.cap, cap_x + cap / 2, cy)
+        inset = d._px(16)
+        c.coords(self.entry_item, x + inset, cy)
+        c.itemconfig(self.entry_item, width=int(w - inset - cap - d._px(22)))
+        self.send_box = (cap_x, top + d._px(7), cap, h - d._px(14))
+
+    def _draw_bubble(self, key, data, x, w, bottom, wrap, list_top, list_bottom):
+        """One bubble with its bottom at `bottom`. Returns its top."""
+        d, c = self.d, self.d.canvas
+        text, mine, colour = data
+        bg, item = self._get(key, "bubble")
+        shadow = d._px(SHADOW)
+        pad_x, pad_y = d._px(self.PAD_X), d._px(self.PAD_Y)
+        tw, th = self._measure(item, text, wrap)
+        bw, bh = tw + 2 * pad_x, th + 2 * pad_y
+        top = bottom - bh
+        bx = x + w - bw - shadow if mine else x
+        size = (int(bw), int(bh), colour)
+        if d._sizes.get(bg) != size:
+            d._sizes[bg] = size
+            d._panel(bg, bx, top, bw, bh, colour, radius=16)
+        c.coords(bg, bx - shadow - 3, top - shadow - 3)
+        c.coords(item, bx + pad_x, top + pad_y)
+        on = top + bh + shadow > list_top and top < list_bottom
+        for i in (bg, item):
+            c.itemconfig(i, state="normal" if on else "hidden")
+        return top
+
+    def _draw_tool(self, key, part, x, bottom, wrap, list_top, list_bottom, now):
+        """One tool call: a grey line, and its arguments beneath it when it's
+        been clicked open. A call that set an agent off also carries a status
+        pill on its line, and opened, the agent's activity streaming in live.
+        Bottom at `bottom`; returns its top."""
+        d, c = self.d, self.d.canvas
+        label, box, code, stream, pill, pill_text = self._get(key, "tool")
+        lx = x + d._px(6)
+        lw, lh = self._measure(label, _tool_label(part, now), wrap)
+        run = _run_of(part)
+        height = lh
+        opened = part.get("open")
+        pad_x, pad_y = d._px(12), d._px(8)
+        if opened:
+            cw, ch = self._measure(code, _tool_args(part), wrap - 2 * pad_x)
+            sw = sh = 0
+            if run is not None:
+                sw, sh = self._measure(stream, _run_lines(run, now), wrap - 2 * pad_x)
+                sh += d._px(10)  # gap between the arguments and the activity
+            bw, bh = max(cw, sw) + 2 * pad_x, ch + sh + 2 * pad_y
+            height += d._px(6) + bh
+        top = bottom - height
+        on = top + height > list_top and top < list_bottom
+
+        c.coords(label, lx, top)
+        c.itemconfig(label, state="normal" if on else "hidden")
+        if opened:
+            size = (int(bw), int(bh))
+            if d._sizes.get(box) != size:
+                d._sizes[box] = size
+                s = paint.Sheet(*size)
+                shape = paint.rounded_rect(s, 1, 1, size[0] - 2, size[1] - 2, d._px(10))
+                s.fill(shape, TRACK)
+                s.stroke(shape, INK, d._px(1.2), alpha=0.25)
+                d._sheet(box, s)
+            box_top = top + lh + d._px(6)
+            c.coords(box, lx, box_top)
+            c.coords(code, lx + pad_x, box_top + pad_y)
+            c.coords(stream, lx + pad_x, box_top + pad_y + ch + d._px(10))
+        for item in (box, code):
+            c.itemconfig(item, state="normal" if on and opened else "hidden")
+        c.itemconfig(stream, state="normal" if on and opened and run is not None else "hidden")
+
+        # The pill: green with a tick once the agent has finished the job.
+        badge = _run_badge(run, now) if run is not None else None
+        if badge and on:
+            text, fill, ink = badge
+            c.itemconfig(pill_text, text=text, fill=ink, state="normal")
+            x0, y0, x1, y1 = c.bbox(pill_text)
+            pw, ph = int(x1 - x0 + d._px(18)), int(lh + d._px(2))
+            if d._sizes.get(pill) != (pw, ph, fill):
+                d._sizes[pill] = (pw, ph, fill)
+                s = paint.Sheet(pw, ph)
+                shape = paint.rounded_rect(s, 1, 1, pw - 2, ph - 2, (ph - 2) / 2)
+                s.fill(shape, fill)
+                s.stroke(shape, INK, d._px(1.2), alpha=0.35)
+                d._sheet(pill, s)
+            px_ = lx + lw + d._px(10)
+            c.coords(pill, px_, top - d._px(1))
+            c.coords(pill_text, px_ + d._px(9), top - d._px(1) + ph / 2)
+            c.itemconfig(pill, state="normal")
+            c.tag_raise(pill_text, pill)
+        else:
+            c.itemconfig(pill, state="hidden")
+            c.itemconfig(pill_text, state="hidden")
+        if on:
+            self._tool_hits.append((lx, top, lx + lw, top + lh, part))
+        return top
+
+    def _measure(self, item, text, wrap):
+        """A text item's size, remeasured only when its text or width changes."""
+        c = self.d.canvas
+        cached = self._measured.get(item)
+        if cached and cached[:2] == (text, wrap):
+            return cached[2:]
+        # A hidden item has no bounding box, so it has to be shown to be measured.
+        c.itemconfig(item, text=text, width=wrap, state="normal")
+        x0, y0, x1, y1 = c.bbox(item)
+        self._measured[item] = (text, wrap, x1 - x0, y1 - y0)
+        return x1 - x0, y1 - y0
+
+
+class PromptFile:
+    """One file that ends up in front of a model, as the Prompts tab edits it.
+
+    Reading and saving go through the module that owns the file where there is
+    one, so the tab gets the same caps and the same backup-to-history as an
+    edit the model makes through an endpoint.
+    """
+
+    def __init__(self, key, label, path, about, read=None, save=None, limit=None):
+        self.key, self.label, self.path, self.about = key, label, path, about
+        self._read, self._save, self.limit = read, save, limit
+
+    def read(self):
+        if self._read:
+            return self._read()
+        with open(self.path, encoding="utf-8") as f:
+            return f.read()
+
+    def save(self, text):
+        if self._save:
+            return self._save(text)
+        text = text.replace("\r\n", "\n").strip() + "\n"
+        folder = os.path.join(os.path.dirname(self.path), "history")
+        os.makedirs(folder, exist_ok=True)
+        now = time.time()
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + f"-{int(now * 1000) % 1000:03d}"
+        name = os.path.splitext(os.path.basename(self.path))[0]
+        shutil.copyfile(self.path, os.path.join(folder, f"{name}-{stamp}.md"))
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return text
+
+    def mtime(self):
+        try:
+            return os.path.getmtime(self.path)
+        except OSError:
+            return None
+
+    def where(self):
+        return os.path.relpath(self.path, os.path.dirname(os.path.abspath(__file__)))
+
+
+def prompt_files():
+    """Every prompt file, in the order a model meets them: the assistant's
+    three parts, its long-term memory and the business brief, then each subagent and agent's own."""
+    about = {
+        "main": "what BananaGent is and how it does the job — opens the system prompt",
+        "personality": "how it sounds",
+        "texting": "how it texts when a message comes from Discord",
+        "tools": "how it uses tools; {{tools}} becomes the live tool list",
+    }
+    files = [PromptFile(part, part.title(), prompts.path(part), about.get(part, ""),
+                        read=lambda p=part: prompts.read(p),
+                        save=lambda t, p=part: prompts.write(p, t),
+                        limit=prompts.MAX_CHARS)
+             for part in prompts.PARTS]
+    files.append(PromptFile("memory", "Memory", memory.LONG_TERM,
+                            "long-term memory, sent after the prompts with every message",
+                            read=memory.read, save=memory.write,
+                            limit=config.LONG_TERM_MAX_CHARS))
+    files.append(PromptFile("business", "Business", business.BRIEF,
+                            "the business brief, sent after long-term memory with every "
+                            "message, with its tasks, leads, metrics and log",
+                            read=business.read, save=business.write,
+                            limit=config.BUSINESS_MAX_CHARS))
+    for kind in subagents.KINDS.values():
+        files.append(PromptFile(f"subagent:{kind.name}", f"Subagent: {kind.name}",
+                                os.path.join(subagents.HERE, f"{kind.name}.md"),
+                                "a subagent's whole system prompt, for one job handed off"))
+    files.append(PromptFile("browser", "Browser agent", agents.browser.PROMPT,
+                            "the browsing agent's prompt, sent with every step it takes"))
+    files.append(PromptFile("coder", "Coding agent", agents.coder.PROMPT,
+                            "the coding agent's prompt: how it runs a job and briefs "
+                            "Claude Code; {{tools}} becomes its tool list"))
+    return files
+
+
+class PromptsPage:
+    """The Prompts tab: every prompt file, editable in place.
+
+    A row of tabs picks the file; the editor under it is a real Tk text widget
+    sitting in a card, since the canvas can't do editing. Unsaved edits are kept
+    per file, so hopping between tabs loses nothing, and a tab with changes
+    wears a dot. Ctrl+S or the Save button writes it; the change applies from
+    the next message. If a file changes on disk while it's open — the model
+    edited its own memory, say — the editor follows, unless you've got edits
+    of your own in it, in which case it says so and leaves them alone.
+    """
+
+    TAB_H = 36
+    BUTTON_W, BUTTON_H = 104, 36
+
+    def __init__(self, dash):
+        self.d = dash
+        c = dash.canvas
+        self.files = prompt_files()
+        self.current = self.files[0]
+        self._disk = {}       # key -> (mtime, text) as last read from disk
+        self._drafts = {}     # key -> text in the editor, if it differs from disk
+        self._views = {}      # key -> (insert index, yview) to come back to
+        self._stale = set()   # keys whose file changed on disk under a draft
+        self._editor_size = None
+        self._message = None  # (text, colour, until) — a save's result, for a while
+        self._checked = 0.0
+        self._loading = False
+        self.tab_geo = []
+        self.buttons = {}
+
+        self.tabs = [(c.create_image(0, 0, anchor="nw"),
+                      c.create_text(0, 0, anchor="center", text=f.label,
+                                    font=dash.f_tab, fill=INK))
+                     for f in self.files]
+        self.card = c.create_image(0, 0, anchor="nw")
+        self.status = c.create_text(0, 0, anchor="w", text="", font=dash.f_label, fill=MUTED)
+        self.count = c.create_text(0, 0, anchor="w", text="", font=dash.f_small, fill=MUTED)
+        self.save_bg = c.create_image(0, 0, anchor="nw")
+        self.save_text = c.create_text(0, 0, anchor="center", text="Save",
+                                       font=dash.f_value, fill=INK)
+        self.revert_bg = c.create_image(0, 0, anchor="nw")
+        self.revert_text = c.create_text(0, 0, anchor="center", text="Revert",
+                                         font=dash.f_value, fill=INK)
+
+        self.text = tk.Text(
+            c, wrap="word", undo=True, autoseparators=True, maxundo=-1,
+            font=dash.f_edit, bg=CARD, fg=INK, insertbackground=INK,
+            insertwidth=dash._px(2), relief="flat", bd=0, highlightthickness=0,
+            selectbackground=NAV, selectforeground=INK, inactiveselectbackground=TRACK,
+            padx=0, pady=0, spacing3=dash._px(3), tabs=(dash.f_edit.measure("    "),))
+        self.text.tag_configure("note", foreground=MUTED, font=dash.f_edit_note)
+        self.text.tag_configure("heading", foreground=INK, font=dash.f_edit_bold)
+        self.text.tag_configure("slot", foreground=LABEL, font=dash.f_edit_bold)
+        self.text.bind("<<Modified>>", self._on_modified)
+        for key in ("<Control-s>", "<Control-S>"):
+            self.text.bind(key, lambda _e: self.save() or "break")
+        self.text_item = c.create_window(0, 0, anchor="nw", window=self.text)
+
+        self._load(self.current)
+
+    # -- files ----------------------------------------------------------------
+    def _read_disk(self, f):
+        text = f.read()
+        self._disk[f.key] = (f.mtime(), text)
+        self._stale.discard(f.key)
+        return text
+
+    def _saved(self, f):
+        if f.key not in self._disk:
+            self._read_disk(f)
+        return self._disk[f.key][1]
+
+    def dirty(self, f):
+        return f.key in self._drafts and self._drafts[f.key] != self._saved(f)
+
+    def _load(self, f):
+        """Put a file in the editor: its draft if it has one, else what's on disk."""
+        try:
+            text = self._drafts.get(f.key, self._saved(f))
+        except Exception as e:
+            text, self._message = "", (f"Couldn't read {f.where()}: {e}", BAD, time.time() + 8)
+        self._fill(text)
+        self.text.edit_reset()
+        spot = self._views.get(f.key)
+        if spot:
+            self.text.mark_set("insert", spot[0])
+            self.text.yview_moveto(spot[1])
+
+    def _fill(self, text):
+        """Replace the editor's contents without it counting as an edit."""
+        self._loading = True
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", text)
+        self.text.edit_modified(False)
+        self._loading = False
+        self._highlight()
+
+    def select(self, f):
+        if f is self.current:
+            return
+        self._views[self.current.key] = (self.text.index("insert"), self.text.yview()[0])
+        self.current = f
+        self._message = None
+        self._load(f)
+        self.focus()
+
+    def save(self):
+        f = self.current
+        text = self.text.get("1.0", "end-1c")
+        try:
+            f.save(text)
+        except Exception as e:
+            self._message = (str(e), BAD, time.time() + 8)
+            return
+        self._drafts.pop(f.key, None)
+        saved = self._read_disk(f)
+        if saved != text:  # the save tidied trailing whitespace; show what was kept
+            spot = (self.text.index("insert"), self.text.yview()[0])
+            self._fill(saved)
+            self.text.mark_set("insert", spot[0])
+            self.text.yview_moveto(spot[1])
+        self._message = ("Saved. It applies from the next message.", GOOD, time.time() + 4)
+
+    def revert(self):
+        f = self.current
+        self._drafts.pop(f.key, None)
+        self._fill(self._read_disk(f))
+        self._message = ("Back to what's saved.", MUTED, time.time() + 3)
+
+    def _on_modified(self, _event=None):
+        if not self.text.edit_modified():
+            return
+        self.text.edit_modified(False)
+        if self._loading:
+            return
+        self._drafts[self.current.key] = self.text.get("1.0", "end-1c")
+        self._highlight()
+
+    def _follow_disk(self, now):
+        """Pick up a change made to the file behind our back, once a second."""
+        if now - self._checked < 1.0:
+            return
+        self._checked = now
+        f = self.current
+        if f.key in self._disk and f.mtime() == self._disk[f.key][0]:
+            return
+        if self.dirty(f):
+            self._stale.add(f.key)  # leave their edits be, but say so
+            return
+        try:
+            text = self._read_disk(f)
+        except Exception:
+            return
+        self._drafts.pop(f.key, None)
+        if text != self.text.get("1.0", "end-1c"):
+            spot = (self.text.index("insert"), self.text.yview()[0])
+            self._fill(text)
+            self.text.mark_set("insert", spot[0])
+            self.text.yview_moveto(spot[1])
+
+    def _highlight(self):
+        """Notes grey and italic, since they never reach the model; headings
+        bold; {{placeholders}} in amber."""
+        t = self.text
+        for tag in ("note", "heading", "slot"):
+            t.tag_remove(tag, "1.0", "end")
+        body = t.get("1.0", "end-1c")
+        for tag, pattern in (("heading", r"(?m)^#{1,6}\s.*$"),
+                             ("slot", r"\{\{\w+\}\}"),
+                             ("note", r"(?s)<!--.*?(?:-->|\Z)")):
+            for m in re.finditer(pattern, body):
+                t.tag_add(tag, f"1.0+{m.start()}c", f"1.0+{m.end()}c")
+        t.tag_raise("note")
+
+    # -- input ----------------------------------------------------------------
+    def focus(self):
+        self.text.focus_set()
+
+    def wheel(self, delta):
+        # With the editor focused, Tk scrolls it already; this covers the rest.
+        if self.d.win.focus_get() is not self.text:
+            self.text.yview_scroll(int(-delta / 120 * 3), "units")
+
+    def hit(self, px, py):
+        for f, (x, y, w, h) in zip(self.files, self.tab_geo):
+            if x <= px <= x + w and y <= py <= y + h:
+                return f
+        for name, (x, y, w, h) in self.buttons.items():
+            if x <= px <= x + w and y <= py <= y + h:
+                return name
+        return None
+
+    def click(self, px, py):
+        what = self.hit(px, py)
+        if isinstance(what, PromptFile):
+            return self.select(what)
+        if what == "save":
+            self.save()
+        elif what == "revert":
+            self.revert()
+        self.focus()
+
+    # -- drawing --------------------------------------------------------------
+    def set_visible(self, on):
+        c = self.d.canvas
+        state = "normal" if on else "hidden"
+        for item in (self.card, self.status, self.count, self.text_item,
+                     self.save_bg, self.save_text, self.revert_bg, self.revert_text):
+            c.itemconfig(item, state=state)
+        for pair in self.tabs:
+            for item in pair:
+                c.itemconfig(item, state=state)
+        if not on:
+            self.tab_geo, self.buttons = [], {}
+
+    def draw(self, now):
+        d, c = self.d, self.d.canvas
+        if not hasattr(d, "content"):
+            return
+        self._follow_disk(now)
+        f = self.current
+        x, y, w, h = d.content
+        shadow = d._px(SHADOW)
+        w -= shadow
+
+        c.itemconfig(d.subtitle, text=f"{f.where()}  ·  {f.about}")
+
+        # Tabs, wrapping onto a second row if the window is too narrow for one.
+        tab_h, gap, pad = d._px(self.TAB_H), d._px(10), d._px(16)
+        tx, ty = x, y
+        self.tab_geo = []
+        for pf, (bg, label) in zip(self.files, self.tabs):
+            dirty = self.dirty(pf)
+            text = pf.label + ("  •" if dirty else "")
+            tw = d.f_tab.measure(text) + 2 * pad
+            if tx + tw > x + w and tx > x:
+                tx, ty = x, ty + tab_h + gap
+            chosen = pf is f
+            colour = NAV if chosen else CARD
+            key = (tw, tab_h, colour)
+            if d._sizes.get(bg) != key:
+                d._sizes[bg] = key
+                d._panel(bg, tx, ty, tw, tab_h, colour, radius=12)
+            c.coords(bg, tx - shadow - 3, ty - shadow - 3)
+            c.coords(label, tx + tw / 2, ty + tab_h / 2)
+            c.itemconfig(label, text=text, fill=INK if chosen or dirty else "#7a5f14")
+            self.tab_geo.append((tx, ty, tw, tab_h))
+            tx += tw + gap
+
+        # The buttons and status along the bottom.
+        bw, bh = d._px(self.BUTTON_W), d._px(self.BUTTON_H)
+        by = y + h - bh - shadow
+        dirty = self.dirty(f)
+        sx = x + w - bw
+        rx = sx - bw - gap
+        self._button(self.save_bg, self.save_text, sx, by, bw, bh, NAV if dirty else PAGE, dirty)
+        self._button(self.revert_bg, self.revert_text, rx, by, bw, bh, CARD if dirty else PAGE, dirty)
+        self.buttons = {"save": (sx, by, bw, bh), "revert": (rx, by, bw, bh)} if dirty else {}
+
+        if self._message and time.time() >= self._message[2]:
+            self._message = None
+        if self._message:
+            status, colour = self._message[:2]
+        elif dirty and f.key in self._stale:
+            status, colour = "Changed on disk since you started. Saving overwrites that.", BAD
+        elif dirty:
+            status, colour = "Unsaved changes  ·  Ctrl+S saves", LABEL
+        else:
+            status, colour = "Notes inside <!-- --> are for you; the model never sees them.", MUTED
+        c.coords(self.status, x + d._px(4), by + bh / 2 - d._px(8))
+        c.itemconfig(self.status, text=_clip(status, int((rx - x) / d._px(6.6))), fill=colour)
+        length = len(self.text.get("1.0", "end-1c"))
+        over = f.limit and length > f.limit
+        c.coords(self.count, x + d._px(4), by + bh / 2 + d._px(10))
+        c.itemconfig(self.count, fill=BAD if over else MUTED,
+                     text=f"{length:,} of {f.limit:,} characters" if f.limit
+                     else f"{length:,} characters")
+
+        # The editor's card fills everything between.
+        top = ty + tab_h + d._px(18)
+        bottom = by - d._px(18)
+        ch = max(d._px(60), bottom - top)
+        key = (int(w), int(ch))
+        if d._sizes.get(self.card) != key:
+            d._sizes[self.card] = key
+            d._panel(self.card, x, top, w, ch, CARD)
+        c.coords(self.card, x - shadow - 3, top - shadow - 3)
+        inset = d._px(20)
+        c.coords(self.text_item, x + inset, top + d._px(16))
+        size = (int(w - 2 * inset), int(ch - d._px(32)))
+        if self._editor_size != size:  # resizing a widget relayouts it; only when it changed
+            self._editor_size = size
+            c.itemconfig(self.text_item, width=size[0], height=size[1])
+
+    def _button(self, bg, label, x, y, w, h, colour, live):
+        d, c = self.d, self.d.canvas
+        key = (w, h, colour)
+        if d._sizes.get(bg) != key:
+            d._sizes[bg] = key
+            d._panel(bg, x, y, w, h, colour, radius=12)
+        c.coords(bg, x - d._px(SHADOW) - 3, y - d._px(SHADOW) - 3)
+        c.coords(label, x + w / 2, y + h / 2)
+        c.itemconfig(label, fill=INK if live else MUTED)
+
+
 class AgentRow:
     """One agent on the Agents page: a header, and its endpoints on a dropdown.
 
     Clicking the header rolls the list of endpoints open. When the agent is
     waiting on an approval the header grows two buttons, so the gate can be
-    answered by clicking as well as by voice.
+    answered by clicking as well as through an endpoint.
     """
 
     HEADER = 96
@@ -854,6 +1824,76 @@ class Card:
 
 
 # -- formatting --------------------------------------------------------------
+def _tool_label(part, now):
+    """A tool call's grey line: what ran, and whether it's still going."""
+    arrow = "▾" if part.get("open") else "▸"
+    if part["status"] == "running":
+        return f"{arrow}  Running {part['name']}" + "." * (1 + int(now * 3) % 3)
+    if part["status"] == "failed":
+        return f"{arrow}  {part['name']} failed"
+    return f"{arrow}  Ran {part['name']}"
+
+
+def _tool_args(part):
+    """The arguments the model passed, as shown when the line is opened."""
+    args = part.get("args")
+    if isinstance(args, dict):
+        text = json.dumps(args, indent=2, ensure_ascii=False) if args else "no arguments"
+    else:
+        text = str(args)  # it wrote something that wasn't JSON; show it as written
+    return text if len(text) <= 2000 else text[:2000] + "\n…"
+
+
+def _run_of(part):
+    """The agent run a tool call set off, as it stands now — or None if it
+    didn't start one, or it's from before a restart and no longer kept."""
+    if not part.get("run"):
+        return None
+    try:
+        return agents.get(part["agent"]).run_view(part["run"])
+    except Exception:
+        return None
+
+
+# status -> (pill text, fill, text colour)
+RUN_BADGES = {
+    "working": ("Working", "#ffe7a3", INK),
+    "waiting": ("Waiting for you", "#ffc58a", INK),
+    "done": ("✓  Completed", GOOD, "#ffffff"),
+    "failed": ("✕  Failed", BAD, "#ffffff"),
+    "stopped": ("■  Stopped", "#e3d9c2", INK),
+}
+
+
+def _run_badge(run, now):
+    status = run.get("status") or "working"
+    text, fill, ink = RUN_BADGES.get(status, RUN_BADGES["working"])
+    if status == "working":
+        text = f"●  Working · step {run.get('steps') or 0}" + "." * (1 + int(now * 3) % 3)
+    return text, fill, ink
+
+
+def _run_lines(run, now, keep=30):
+    """The agent's activity, oldest first, as it streams in; then its answer."""
+    lines = run.get("lines") or []
+    shown = [_clip(line, 240) for line in lines[-keep:]]
+    if len(lines) > keep:
+        shown.insert(0, f"… {len(lines) - keep} earlier")
+    text = "\n".join(f"›  {line}" for line in shown) or "›  starting" + "." * (1 + int(now * 3) % 3)
+    result = run.get("result")
+    if run.get("status") == "done" and isinstance(result, dict) and result.get("answer"):
+        text += f"\n\n→  {_clip(result['answer'], 600)}"
+    return text
+
+
+def _unloads(loaded):
+    """keep_alive -1 comes back as an expiry centuries away; that means never."""
+    if not loaded["resident"]:
+        return "—"
+    left = loaded["unloads_in_seconds"]
+    return "never" if left is not None and left > 365 * 86400 else _dur(left)
+
+
 def _or(value, fallback="—"):
     return str(value) if value else fallback
 
@@ -865,15 +1905,6 @@ def _gb(value):
 def _clip(text, n):
     text = str(text)
     return text if len(text) <= n else text[:n - 1] + "…"
-
-
-def _card_name(gpu):
-    """'NVIDIA GeForce RTX 4070' is mostly branding; the model is the useful part."""
-    if not gpu:
-        return "the CPU"
-    for noise in ("NVIDIA ", "GeForce ", "AMD ", "Radeon "):
-        gpu = gpu.replace(noise, "")
-    return _clip(gpu, 22)
 
 
 def _first_sentence(text):
@@ -909,24 +1940,6 @@ def _task_line(state):
     if state.get("detail") and state["status"] != "idle":
         return state["detail"]
     return state.get("task") or state.get("url") or "nothing on the go"
-
-
-def _voice_state(app, speech):
-    if app["listening"]:
-        return "listening"
-    if speech.get("speaking"):
-        return "speaking"
-    if not speech.get("ready"):
-        return "silent" if not speech.get("enabled") else "voice loading"
-    return "idle" if speech["enabled"] else "muted"
-
-
-def _mic_name(name):
-    """Windows wraps device names in 'Microphone (…)'; the inside is the name."""
-    if not name:
-        return "system default"
-    inner = re.match(r"^\s*(?:Microphone|Headset|Line In)\s*\((.+?)\)?\s*$", str(name))
-    return inner.group(1) if inner else str(name)
 
 
 def _dur(seconds):

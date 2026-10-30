@@ -1,0 +1,9 @@
+{
+  "name": "bananagent-tools",
+  "private": true,
+  "description": "The CLIs the coding agent deploys with, installed here rather than globally so BananaGent finds them however it was started. npm install --prefix tools",
+  "dependencies": {
+    "neon": "^7.0.4",
+    "vercel": "^62.1.0"
+  }
+}

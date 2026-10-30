@@ -93,53 +93,74 @@ DECISION_SCHEMA = {
     "required": ["thought", "action", "risk"],
 }
 
-SYSTEM = """You are operating a real web browser on someone's own computer, on their behalf.
-
-You are given a task, and after every step you are shown the page you are now on.
-Choose exactly one next step each time.
-
-navigate  go to a URL. Use this first if the task names a site.
-act       one concrete interaction, described the way you would tell a person:
-          "click the Sign up button", "type jacob@example.com into the email field".
-          One step at a time. Never chain steps with "and then".
-extract   read something off the page and remember it.
-finish    the task is done. Put what you found, or what you did, in `answer`.
-give_up   it cannot be done from here. Explain why in `answer`.
-
-Label every step honestly in `risk`:
-  none         moving around, reading, typing into a field
-  submit       submitting a form
-  account      creating an account
-  purchase     spending money
-  consent      agreeing to terms or a cookie banner
-  message      sending or posting something other people will see
-  delete       removing something
-  credentials  a password, a card number, or a one-time code is being asked for
-
-Anything other than `none` stops and asks the person first, so labelling honestly
-costs you nothing and mislabelling wastes their time. Never type a password or a
-card number yourself — label it `credentials` and the person will type it.
-
-Prefer the simplest step that makes progress. If a page didn't change the way you
-expected, look at what is actually on it now rather than repeating yourself.
-
-Before anything else, read WHAT YOU HAVE DONE. If the answer to the task is
-already there, choose `finish` immediately and put it in `answer`. Never read the
-same thing twice."""
+PROMPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.md")
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
-def _release_profile(profile):
-    """Kill a leftover Chrome still holding our profile directory.
+def system_prompt():
+    """agents/browser.md with its notes stripped, re-read every time so an
+    edit from the dashboard's Prompts tab applies from the next step."""
+    with open(PROMPT, encoding="utf-8") as f:
+        return _COMMENT.sub("", f.read()).strip()
+
+
+def _app_path(exe):
+    """Where Windows says `exe` is installed (the App Paths registry key), if anywhere."""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    key = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                return winreg.QueryValue(k, None)
+        except OSError:
+            continue
+    return None
+
+
+def find_browser():
+    """The Chromium browser to drive: Chrome if it's installed, else Edge.
+
+    Stagehand's own search only knows the three default Chrome folders, and
+    gives up if Chrome isn't in one of them. Edge speaks the same DevTools
+    protocol and ships with every copy of Windows, so it's the fallback.
+    """
+    import shutil
+
+    roots = [os.environ.get(v) for v in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)")]
+    roots = [r for r in roots if r]
+    candidates = [
+        config.AGENT_CHROME,
+        os.environ.get("CHROME_PATH"),
+        _app_path("chrome.exe"),
+        *(os.path.join(r, "Google", "Chrome", "Application", "chrome.exe") for r in roots),
+        shutil.which("chrome"),
+        _app_path("msedge.exe"),
+        *(os.path.join(r, "Microsoft", "Edge", "Application", "msedge.exe") for r in roots),
+        shutil.which("msedge"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path.strip('"')):
+            return path.strip('"')
+    raise RuntimeError(
+        "No Chrome or Edge found to drive. Install Chrome, or set AGENT_CHROME in "
+        "config.py to the full path of chrome.exe.")
+
+
+def _release_profile(profile, exe):
+    """Kill a leftover browser still holding our profile directory.
 
     Only ours: matched on this exact profile path in the command line, so the
-    Chrome you have open with your own tabs is never touched. Without this, one
+    browser you have open with your own tabs is never touched. Without this, one
     hard kill of the assistant leaves an orphan and every later launch times out
     waiting for a directory it will never get.
     """
     import subprocess
 
     script = (
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+        f"Get-CimInstance Win32_Process -Filter \"Name='{os.path.basename(exe)}'\" | "
         f"Where-Object {{ $_.CommandLine -like '*{profile}*' }} | "
         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
     try:
@@ -187,6 +208,7 @@ class BrowserAgent(Agent):
         "working through signups and checkouts — pausing to ask before anything "
         "that can't be taken back.")
     gated = tuple(GATES)
+    answer_tool = "browser_answer (approve or deny)"
 
     def __init__(self):
         super().__init__()
@@ -237,10 +259,10 @@ class BrowserAgent(Agent):
         profile = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                config.AGENT_PROFILE)
         os.makedirs(profile, exist_ok=True)
-        chrome = config.AGENT_CHROME if config.AGENT_CHROME and os.path.exists(
-            config.AGENT_CHROME) else None
+        chrome = find_browser()
+        self.log(f"launching {chrome}")
 
-        _release_profile(profile)
+        _release_profile(profile, chrome)
         self._browser = await LocalBrowser().launch(
             executable_path=chrome,
             headless=config.AGENT_HEADLESS,
@@ -256,8 +278,8 @@ class BrowserAgent(Agent):
         )
         self._sh = await Stagehand.create(
             browser=self._browser,
-            model=llm.generate,             # local Ollama, no provider key
-            system_prompt=SYSTEM,
+            model=llm.generate,             # the Spark's Ollama, no provider key
+            system_prompt=system_prompt(),
             self_heal=True,
             logging={"level": "error"},
         )
@@ -316,7 +338,7 @@ class BrowserAgent(Agent):
     def _run(self, task):
         with self._boot:
             if self._sh is None:
-                self.step("opening Chrome")
+                self.step("opening the browser")
                 self._call(self._open_browser(), timeout=120.0)
 
         model = llm.resolve_model()
@@ -396,8 +418,16 @@ class BrowserAgent(Agent):
                 history.append(f"read ({instruction}): {_snip(found, 500)}")
             else:
                 self.step(instruction or thought or "acting")
-                self._call(self._sh.act(instruction), timeout=180.0)
-                history.append(f"did: {instruction}")
+                done = self._call(self._sh.act(instruction), timeout=180.0)
+                result = getattr(done, "data", done)
+                if getattr(result, "success", True) is False:
+                    # Say so, or the model assumes it worked and reports a page
+                    # it never reached.
+                    why = getattr(result, "message", "") or "no matching element"
+                    self.log(f"couldn't: {instruction} ({why})")
+                    history.append(f"FAILED, nothing happened: {instruction} ({why})")
+                else:
+                    history.append(f"did: {instruction}")
             history[:] = history[-config.AGENT_MEMORY:]
         else:
             # Out of steps, but anything it read along the way is still worth
@@ -447,10 +477,10 @@ class BrowserAgent(Agent):
 
         response = self._call(llm.client().chat(
             model=llm.resolve_model(),
-            messages=[{"role": "system", "content": SYSTEM}, message],
+            messages=[{"role": "system", "content": system_prompt()}, message],
             format=DECISION_SCHEMA,
-            options=config.AGENT_OPTIONS,
-            keep_alive=config.AGENT_KEEP_ALIVE,
+            options=llm.options(),
+            keep_alive=config.KEEP_ALIVE,
             think=config.AGENT_THINK,
         ), timeout=config.AGENT_STEP_SECONDS)
 
@@ -516,7 +546,7 @@ class BrowserAgent(Agent):
             "url": self.url,
             "page_title": self.page_title,
             "browser_open": self._sh is not None,
-            "model": llm.available() or f"{config.AGENT_MODEL} (not pulled)",
+            "model": llm.resolve_model(),
         })
         return state
 

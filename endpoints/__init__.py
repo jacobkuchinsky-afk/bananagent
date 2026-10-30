@@ -4,12 +4,19 @@ Importing this imports every module beside it, which is what registers their
 endpoints. To add capabilities, drop a new module in this folder — nothing here
 needs editing, and it will show up in the model's tool list and in the system
 prompt on the next run.
+
+Tools the coding agent makes for BananaGent (toolbox.py) are loaded after
+that, from files rather than modules, so a made tool can never take a
+built-in's name.
 """
 
 import importlib
 import pkgutil
 
 from .registry import (  # noqa: F401  (re-exported for endpoint modules to use)
+    ASSISTANT,
+    CODER,
+    EVERYONE,
     MAJOR,
     MINOR,
     Endpoint,
@@ -22,9 +29,14 @@ from .registry import (  # noqa: F401  (re-exported for endpoint modules to use)
     dispatch,
     endpoint,
     get,
+    names,
+    on_refresh,
     on_ui,
     param,
+    refresh,
+    register,
     tools_schema,
+    unregister,
 )
 
 
@@ -38,3 +50,8 @@ def _discover():
 
 
 _discover()
+
+import toolbox  # noqa: E402  (needs every built-in registered first)
+
+on_refresh(toolbox.sync)
+toolbox.sync()

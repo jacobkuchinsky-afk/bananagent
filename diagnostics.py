@@ -7,6 +7,9 @@ Collection touches the network, so it never runs on the Tk thread — the
 dashboard polls it from a worker and the endpoint is already off-thread. Every
 field degrades to None rather than raising: a dashboard that renders "unknown"
 is more useful than one that fails to draw because the server went away.
+
+The model it reports on is the one answering messages: config.MODEL on
+config.OLLAMA_HOST, the DGX Spark.
 """
 
 import re
@@ -73,10 +76,8 @@ def gpu():
 
 def snapshot(app=None):
     """One reading of everything. Never raises."""
-    import brain
-
-    version = brain.server_version()
-    model = brain.resolve_model() if version else config.MODEL
+    version = (_api("/api/version") or {}).get("version")
+    model = config.MODEL
 
     tags = _api("/api/tags") or {}
     on_disk = next((m.get("size") for m in tags.get("models", [])
@@ -87,7 +88,8 @@ def snapshot(app=None):
     info = shown.get("model_info") or {}
     context = next((v for k, v in info.items() if k.endswith(".context_length")), None)
 
-    running = next(iter((_api("/api/ps") or {}).get("models", []) or []), None)
+    running = next((m for m in (_api("/api/ps") or {}).get("models", []) or []
+                    if (m.get("model") or m.get("name")) == model), None)
     resident = running.get("size") if running else None
     in_vram = running.get("size_vram") if running else None
 
@@ -98,7 +100,6 @@ def snapshot(app=None):
             "host": config.OLLAMA_HOST,
             "version": version,
             "up": bool(version),
-            "pinned": bool(config.OLLAMA_SERVE_EXE),
         },
         "model": {
             "name": model,
@@ -127,21 +128,8 @@ def snapshot(app=None):
             "vram_total_gb": _round(gpu_total),
         },
         "app": _app_stats(app),
-        "speech": _speech(app),
         "taken_at": time.time(),
     }
-
-
-def _speech(app):
-    speaker = getattr(app, "speaker", None) if app else None
-    if speaker is None:
-        return {"enabled": False, "ready": False, "voice": None,
-                "speed": None, "speaking": False, "error": "not running"}
-    try:
-        return speaker.status()
-    except Exception:
-        return {"enabled": False, "ready": False, "voice": None,
-                "speed": None, "speaking": False, "error": "unavailable"}
 
 
 def _memory(field):
@@ -159,9 +147,11 @@ def _app_stats(app):
         "questions_answered": 0,
         "last_reply_seconds": None,
         "recent_reply_seconds": [],
-        "microphone": None,
+        "last_message": None,
+        "short_term_tokens": None,
+        "long_term_facts": None,
         "hotkey": config.HOTKEY,
-        "listening": False,
+        "box_open": False,
     }
     if app is None:
         return stats
@@ -170,10 +160,13 @@ def _app_stats(app):
         stats["questions_answered"] = app.turns
         stats["last_reply_seconds"] = app.last_reply
         stats["recent_reply_seconds"] = list(app.reply_times)
-        stats["listening"] = bool(app.held)
-        import sounddevice as sd
+        stats["last_message"] = app.last_message
+        import memory
 
-        stats["microphone"] = sd.query_devices(app.rec.device, "input")["name"]
+        stats["short_term_tokens"] = memory.short_term_tokens()
+        stats["long_term_facts"] = sum(1 for line in memory.render().splitlines()
+                                       if line.lstrip().startswith(("- ", "* ")))
+        stats["box_open"] = app.ui.state == app.ui.TYPING
     except Exception:
         pass
     return stats

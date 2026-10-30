@@ -28,7 +28,7 @@ $sc.TargetPath = $pyw
 $sc.Arguments = "main.py"
 $sc.WorkingDirectory = $here
 $sc.WindowStyle = 7           # minimized, though pythonw shows nothing anyway
-$sc.Description = "BananaGent voice assistant"
+$sc.Description = "BananaGent assistant"
 $sc.Save()
 
 "installed $link"
