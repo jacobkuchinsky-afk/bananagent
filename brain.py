@@ -53,6 +53,25 @@ import memory
 import prompts
 
 CALL = re.compile(r"\[\[\s*call\s+(\w+)\s*(\{.*?\})?\s*\]\]", re.S)
+# The same with only one closing bracket. After a list argument the model
+# often ends the call `"b"]}]` rather than `"b"]}]]`, and the call never
+# completed: it was shown as text and nothing ran. Taken only when what's in
+# the braces is a whole JSON object, so it can't cut a call off early.
+LOOSE_CALL = re.compile(r"\[\[\s*call\s+(\w+)\s*(\{.*?\})\s*\]", re.S)
+
+
+def _find_call(text):
+    """The first complete call line in text, or None."""
+    strict = CALL.search(text)
+    for m in LOOSE_CALL.finditer(text):
+        if strict is not None and m.start() >= strict.start():
+            break
+        try:
+            if isinstance(json.loads(m.group(2)), dict):
+                return m
+        except ValueError:
+            pass
+    return strict
 # What a tool result starts with. Only we write these; now and then the model
 # skips the call and writes one itself, made-up numbers and all.
 FAKE = "Tool result for"
@@ -467,7 +486,7 @@ def _stream(messages, stop=None):
                     continue  # might still turn out to be a stamp
                 pending, opening = STAMP.sub("", pending, count=1), False
 
-            match = CALL.search(pending)
+            match = _find_call(pending)
             fake = pending.find(FAKE)
             if fake != -1 and (not match or fake < match.start()):
                 if pending[:fake].strip():
