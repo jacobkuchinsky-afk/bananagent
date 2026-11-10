@@ -658,6 +658,46 @@ what was created, deleted or modified.
 | `list_triggers()` | Everything still set, with ids |
 | `cancel_trigger(trigger_id)` | Removes one |
 
+## Asking you questions
+
+When BananaGent needs you to decide or tell it something before it can go on,
+it calls `ask_question(question, kind, choices)` (`endpoints/questions.py`)
+rather than asking in a sentence. There are three kinds:
+
+| `kind` | You get |
+|---|---|
+| `choice` | A button for each of 2–10 options, plus *Something else…* for an answer of your own |
+| `short` | A one-line box: a name, a date, a number |
+| `long` | A big multi-line box, for an answer that takes a few sentences |
+
+- **Chat tab.** The question is a card in the conversation. A choice button sends
+  right away. *Type your answer* / *Write your answer* opens a small window: Enter
+  sends a short answer, ctrl+Enter a long one. Once it's answered, the card shows
+  ✓ and your answer, and its buttons go.
+- **Discord.** The question is a message with buttons. A choice button answers in
+  one tap; *Answer* opens Discord's pop-up form, with a one-line box or a paragraph
+  box. The message is then edited to show ✅ and your answer. The button ids say
+  which question and option they are, so a question asked before a restart still
+  works after one.
+- **The corner box** can't draw buttons, so it shows the question with its options
+  numbered, and stays up longer than usual. Press <kbd>`</kbd> and type the answer.
+
+Either way, your answer goes to the model as your next message, *Answer to your
+question "…": …*, and it carries on from there. You can always just type a reply
+instead of using the buttons.
+
+The call ends the reply (`ends_reply=True` on the endpoint; `brain.converse`
+stops there), so the model can't answer its own question or keep going without
+you. A reply that's only the question still goes into short-term memory, so the
+model knows what it asked when your answer comes back.
+
+Tested live with `qwen3.8:27b`: 8/8 requests that called for a question used
+the right kind, and plain questions (*"what's 17 times 23?"*) didn't trigger one.
+That test turned up a bug in the call parser. After a list argument, the model
+often closes a call with one bracket instead of two (`"b"]}]`), so the call was
+shown as text and never ran. `brain.LOOSE_CALL` now accepts a single closing
+bracket, but only when what's inside the braces is a complete JSON object.
+
 ## Subagents
 
 For jobs that would swamp the conversation — writing something long, working through a
@@ -996,6 +1036,7 @@ the prompt on their own. Keep it: without it the model doesn't know any tools ex
 | `endpoints/business.py` | Endpoints for the business record: brief, leads, tasks, log, metrics |
 | `endpoints/triggers.py` | `set_reminder`, `watch_path`, `list_triggers`, `cancel_trigger` |
 | `endpoints/subagents.py` | `subagent_run`, which hands a job to a subagent |
+| `endpoints/questions.py` | `ask_question`: multiple choice, short or long answer, in the Chat tab and on Discord |
 | `endpoints/search.py` | `web_search`, through ddgs: Bing, then DuckDuckGo, then Yahoo |
 | `endpoints/integrations.py` | `integrations_status` and `integration_connect`, for every outside platform |
 | `endpoints/classroom.py` | `classroom`, which reads Google Classroom |
