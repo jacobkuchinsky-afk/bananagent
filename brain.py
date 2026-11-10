@@ -506,7 +506,34 @@ def _stream(messages, stop=None):
             if chunk.get("done"):
                 break
     if pending:
+        cut_off = _unclosed_call(pending)
+        if cut_off is not None:
+            before, call = cut_off
+            if before:
+                yield "text", before
+            yield "call", call
+            return
         yield "text", pending  # it looked like a call starting, but never became one
+
+
+# A call the model stopped writing before its closing brackets: the JSON is
+# finished (`..."b"]}`) and then nothing. Seen live with ask_question's list
+# of choices: it's shown as text, and sending it back only gets the same again.
+_OPEN_CALL = re.compile(r"\[\[\s*call\s+(\w+)\s*(\{.*\})\s*\]?\s*$", re.S)
+
+
+def _unclosed_call(text):
+    """(text before it, call) for a call at the very end of a finished stream
+    that's missing its closing brackets, or None."""
+    m = _OPEN_CALL.search(text)
+    if m is None:
+        return None
+    try:
+        if not isinstance(json.loads(m.group(2)), dict):
+            return None
+    except ValueError:
+        return None
+    return text[:m.start()], (m.group(1), m.group(2), f"[[call {m.group(1)} {m.group(2)}]]")
 
 
 def _split_safe(pending):
