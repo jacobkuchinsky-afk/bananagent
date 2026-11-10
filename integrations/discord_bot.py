@@ -98,8 +98,10 @@ def start():
         intents = discord.Intents.default()
         intents.message_content = True  # privileged: switched on in the developer portal
         _client = discord.Client(intents=intents)
-        _client.event(_on_ready)
-        _client.event(_on_message)
+        # Set by name: discord.py dispatches to on_<event> attributes, and its
+        # @event decorator would register these under their own names instead.
+        _client.on_ready = _on_ready
+        _client.on_message = _on_message
         _loop, _error = asyncio.new_event_loop(), ""
         _ready.clear()
         _thread = threading.Thread(target=_run, args=(_client, _loop, token),

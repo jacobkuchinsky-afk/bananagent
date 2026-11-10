@@ -44,6 +44,7 @@ memory/history/
 business/BUSINESS.md
 business/data.json*
 business/history/
+triggers/triggers.json*
 subagents/history/
 agents/history/
 

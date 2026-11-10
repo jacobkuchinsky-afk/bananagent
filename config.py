@@ -235,6 +235,15 @@ CLASSROOM_DUE_DAYS = 7
 CLASSROOM_RECENT_DAYS = 7
 CLASSROOM_TEXT_CHARS = 3000  # one assignment's or announcement's text
 
+# Google Drive. Same Google sign-in client as Classroom, its own login (so it
+# can be a different account), and read-only: BananaGent can find, list and
+# read your files — Docs, Sheets, Slides, PDFs, Word and text files — and
+# change nothing. The Drive API has to be enabled in the Cloud project too.
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+DRIVE_READ_CHARS = 10000  # one page of a file's text; "start" reads on from there
+DRIVE_LIST_COUNT = 15  # files a search or "recent" returns
+DRIVE_MAX_DOWNLOAD_MB = 25  # a PDF or file bigger than this isn't read
+
 # --- Discord ------------------------------------------------------------------
 # Text BananaGent from anywhere: it signs in as a Discord bot with
 # DISCORD_BOT_TOKEN from secrets.env (see the README) and answers like the `

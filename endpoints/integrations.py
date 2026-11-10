@@ -24,11 +24,12 @@ def integrations_status():
 @endpoint(
     tier=MAJOR,
     description=(
-        "Connects you to an outside platform by opening its sign-in page in the "
-        "user's browser, then waits (up to a few minutes) while they pick an account "
-        "and approve. Only when the user asks to connect, or agrees to after a tool "
-        "said the platform isn't connected — tell them a sign-in page is about to "
-        "open. With disconnect, signs out and forgets the login instead. Platforms: "
+        "Connects you to an outside platform. Most open their sign-in page in the "
+        "user's browser, then wait (up to a few minutes) while they pick an account "
+        "and approve — tell them a sign-in page is about to open. Discord has no "
+        "sign-in page: it signs your bot in with its saved token in seconds. Only when "
+        "the user asks to connect, or agrees to after a tool said the platform isn't "
+        "connected. With disconnect, signs out and forgets the login instead. Platforms: "
         + "; ".join(f"{p.name} ({p.title})" for p in integrations.PLATFORMS.values())
     ),
     params={

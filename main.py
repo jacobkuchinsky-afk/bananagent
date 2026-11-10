@@ -94,6 +94,7 @@ import config
 import endpoints
 import memory
 import prompts
+import triggers
 from dashboard import Dashboard
 from integrations import discord_bot
 from overlay import Overlay
@@ -194,6 +195,10 @@ class App:
         self.notices = collections.deque()
         agents.listen(lambda agent, event, label, message:
                       self.events.put(("notice", (label, message))))
+        # Reminders and file watches it set itself (triggers/) report in the
+        # same way, so a note it left for later gets a reply of its own.
+        triggers.listen(lambda label, message: self.events.put(
+            ("notice", (label, f"{agents.NOTICE} {label}.\n\n{message}"))))
         self.reply_source = None  # "box" or "chat": where the current reply was asked
         self.restarting = False  # set by restart(): relaunch once the loop has ended
         # Discord: the reply going out there now, if any, and where you last
@@ -216,6 +221,7 @@ class App:
         self.dash = Dashboard(self.ui.root, self)
 
         endpoints.bind(self)  # lets endpoints act on the running app
+        triggers.start()
         self._hook_keys()
         if config.WARM_ON_START:
             threading.Thread(target=self._warm_up, daemon=True).start()
@@ -241,6 +247,7 @@ class App:
                 except Exception:
                     pass
             discord_bot.stop()
+            triggers.stop()
             if self.restarting:
                 self._relaunch()
 

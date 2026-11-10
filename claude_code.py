@@ -84,15 +84,21 @@ def find_exe():
         return native
     # The desktop app is an MSIX package: %APPDATA%\Claude is redirected into
     # its container, and only exists as that path for processes inside the
-    # app. From out here the files are under LocalAppData\Packages.
-    bundled = glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code",
-                                     "*", "claude.exe"))
-    bundled += glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages",
-                                      "Claude_*", "LocalCache", "Roaming", "Claude",
-                                      "claude-code", "*", "claude.exe"))
+    # app. From out here the files are under LocalAppData\Packages. Older
+    # versions keep claude.exe in claude-code\<version>\, newer ones one
+    # level down, in claude-code\<version>\<build hash>\.
+    roots = [os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code")]
+    roots += glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages",
+                                    "Claude_*", "LocalCache", "Roaming", "Claude",
+                                    "claude-code"))
+    bundled = []
+    for root in roots:
+        bundled += glob.glob(os.path.join(root, "*", "claude.exe"))
+        bundled += glob.glob(os.path.join(root, "*", "*", "claude.exe"))
 
     def version(p):
-        name = os.path.basename(os.path.dirname(p))
+        parts = os.path.normpath(p).split(os.sep)
+        name = parts[parts.index("claude-code") + 1]
         return tuple(int(x) if x.isdigit() else 0 for x in name.split("."))
 
     return max(bundled, key=version) if bundled else None

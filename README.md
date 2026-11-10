@@ -598,6 +598,31 @@ Leads and tasks are picked out by name loosely — case doesn't matter, and part
 task's wording will do if it matches only one — except that `business_lead` only updates
 on an exact name, so adding "Sam" never overwrites "Samantha Lee".
 
+## Reminders and watches
+
+BananaGent can message its future self. `set_reminder` leaves a note for a time —
+*remind me at 5*, *every weekday at 9*, *in 20 minutes* — and `watch_path` leaves one
+for when a file or folder changes: written, created, deleted, or anything inside a
+folder. When one goes off, the note comes back as an automatic notice, the same way a
+finished agent reports in, so the model gets a turn of its own and acts on it — tells
+you in the corner (or on Discord, if that's where you last wrote), or does what the note
+says. Nobody has to be talking to it.
+
+They're kept in `triggers/triggers.json`, so they survive restarts. A reminder that came
+due while the app was off goes off as soon as it starts and says when it was due; a
+repeating one fires once for everything it missed and moves on. A folder's contents are
+saved with its watch, so changes made while the app was off are caught too. One thread
+checks everything every 3 seconds, and a change only counts once two checks agree, so a
+file being written fires once, a few seconds after the writing stops — with a list of
+what was created, deleted or modified.
+
+| Endpoint | What it does |
+|---|---|
+| `set_reminder(note, at, in_minutes, repeat, every_minutes)` | A note at a time; `repeat` is hourly, daily, weekdays or weekly |
+| `watch_path(path, note, once)` | A note when a file or folder changes; the path needn't exist yet |
+| `list_triggers()` | Everything still set, with ids |
+| `cancel_trigger(trigger_id)` | Removes one |
+
 ## Subagents
 
 For jobs that would swamp the conversation — writing something long, working through a
@@ -676,13 +701,14 @@ that it isn't set up rather than failing silently.
 ## Outside platforms
 
 BananaGent can sign in to services on your behalf and use them as you. Each one is a
-module in `integrations/`; today there's one, **Google Classroom**.
+module in `integrations/`: **Google Classroom**, **Google Drive**, and Discord (below).
 
 | Endpoint | Does |
 |---|---|
 | `integrations_status()` | Every platform, what it gives, and whether it's connected and as whom |
 | `integration_connect(platform, disconnect)` | Opens the platform's sign-in page in your browser and waits for you to approve; or signs out |
 | `classroom(action, course, assignment, days)` | Reads Classroom — see below |
+| `drive(action, query, file, start)` | Reads Drive — see *Google Drive* below |
 
 Ask *"connect to Google Classroom"* and a Google sign-in page opens in your default
 browser. Pick the account Classroom is on (your school account), approve, and the tab
@@ -716,7 +742,8 @@ so "turn in my essay" could never work on a teacher's real assignment.
 Google needs to know which app is asking, so BananaGent needs its own OAuth client:
 
 1. In [console.cloud.google.com](https://console.cloud.google.com), make a project
-   (or use one), and in **APIs & Services → Library** enable the **Google Classroom API**.
+   (or use one), and in **APIs & Services → Library** enable the **Google Classroom API**
+   and the **Google Drive API** — whichever you'll connect.
 2. **APIs & Services → OAuth consent screen**: if you can choose **Internal** (the project
    is under your school's Google Workspace), do. Otherwise choose **External**, and add your
    school address under **Test users**.
@@ -738,6 +765,31 @@ Then ask BananaGent to connect. Two things that can get in the way:
 
 `GOOGLE_*` keys are only read by `integrations/google.py`; they're kept out of the
 environment Claude Code's runs get, like `GMAIL_*`.
+
+### Google Drive
+
+*"Connect Google Drive"* signs in the same way, with its own login
+(`integrations/tokens/drive.json`), so it can be a different account from Classroom's.
+It's read-only (`DRIVE_SCOPES`): it sees My Drive, files shared with you, and shared
+drives, and changes nothing.
+
+| Action | Gives |
+|---|---|
+| `search` | Files with those words in their name or contents |
+| `recent` | The files you've opened or changed most recently |
+| `folder` | What's in a folder — My Drive if none is named |
+| `read` | A file's text |
+
+A file can be named (ignoring case and extension; of several with the same name the
+newest is read and the others listed), given by id, or given as its Drive or Docs link — so an attachment
+`classroom` lists can be read straight from its link. Reading turns it into text:
+Google Docs export as markdown (headings, lists and tables survive; images become
+`[image]`), Slides as plain
+text, Sheets as CSV of the **first sheet only** (all Drive's export gives), PDFs through
+`pypdf` (a scanned PDF has no text to give), Word files from their XML, and text files
+as they are. Images, Excel, PowerPoint and the rest come back as details and a link.
+Long files come `DRIVE_READ_CHARS` at a time, with the `start` to read on from; the last
+few files' text is kept so reading on doesn't download again.
 
 ### Adding another platform
 
@@ -907,11 +959,13 @@ the prompt on their own. Keep it: without it the model doesn't know any tools ex
 | `endpoints/prompts.py` | Endpoints for reading and editing the prompts |
 | `endpoints/memory.py` | Endpoints for long-term memory and clearing the conversation |
 | `endpoints/business.py` | Endpoints for the business record: brief, leads, tasks, log, metrics |
+| `endpoints/triggers.py` | `set_reminder`, `watch_path`, `list_triggers`, `cancel_trigger` |
 | `endpoints/subagents.py` | `subagent_run`, which hands a job to a subagent |
 | `endpoints/search.py` | `web_search`, through ddgs: Bing, then DuckDuckGo, then Yahoo |
 | `endpoints/integrations.py` | `integrations_status` and `integration_connect`, for every outside platform |
 | `endpoints/classroom.py` | `classroom`, which reads Google Classroom |
-| `integrations/` | Outside platforms: the registry, Google sign-in (`google.py`), Classroom |
+| `endpoints/drive.py` | `drive`, which finds and reads Google Drive files |
+| `integrations/` | Outside platforms: the registry, Google sign-in (`google.py`), Classroom, Drive |
 | `endpoints/coding.py` | The assistant's four coding-agent endpoints |
 | `endpoints/coder_tools.py` | The coding agent's own tools (scope `coder`) |
 | `agents/coder.py` | The coding agent: the plan → brief → check → repeat loop |
@@ -920,6 +974,7 @@ the prompt on their own. Keep it: without it the model doesn't know any tools ex
 | `workspace.py` | The sandbox: projects, confined file access, `sandbox_run` and its tripwire |
 | `memory/` | Short-term window and long-term `MEMORY.md` |
 | `business/` | The business record: `BUSINESS.md` and `data.json` |
+| `triggers/` | Reminders and file watches: storage, the checking thread, firing |
 | `subagents/` | The subagent framework, and each kind's prompt |
 | `prompts/` | The prompt files, their defaults, and the loader that assembles them |
 | `config.py` | Every knob worth turning |

@@ -17,5 +17,6 @@ stagehand==4.0.1
 # the authorized HTTP session its API calls go through
 google-auth-oauthlib==1.5.0
 google-auth==2.62.0
+pypdf==6.21.4         # drive: the text out of PDFs
 # Texting BananaGent on Discord (integrations/discord_bot.py): the bot account
 discord.py==2.7.1

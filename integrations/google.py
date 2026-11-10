@@ -91,6 +91,11 @@ class GoogleLogin:
                 raise RuntimeError(
                     f"Signing in to {self.title} didn't finish within "
                     f"{config.INTEGRATION_CONNECT_SECONDS} seconds. Try again.") from None
+            if "access_denied" in str(e):
+                raise RuntimeError(
+                    f"Google refused the {self.title} sign-in: the user pressed Cancel, or "
+                    "the account's Workspace admin blocks this app from that data. Ask "
+                    "the user what Google's page said.") from None
             raise RuntimeError(f"Signing in to {self.title} failed "
                                f"({type(e).__name__}: {e}). Try again.") from None
         if not creds.refresh_token:
@@ -159,14 +164,22 @@ class GoogleLogin:
 
     # -- calling the API ----------------------------------------------------------
     def get(self, url, **params):
-        """GET one JSON resource. Errors come back as sentences the model can act on."""
+        """GET one JSON resource."""
+        return self._request(url, params).json()
+
+    def download(self, url, **params):
+        """GET a file's bytes — an export or alt=media download."""
+        return self._request(url, params).content
+
+    def _request(self, url, params):
+        """One GET. Errors come back as sentences the model can act on."""
         from google.auth.transport.requests import AuthorizedSession
 
         session = AuthorizedSession(self.credentials())
         params = {k: v for k, v in params.items() if v is not None}
         r = session.get(url, params=params, timeout=config.INTEGRATION_TIMEOUT)
         if r.ok:
-            return r.json()
+            return r
         try:
             err = r.json().get("error", {})
             message, status = err.get("message", r.text), err.get("status", "")
