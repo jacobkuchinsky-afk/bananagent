@@ -401,6 +401,12 @@ def converse(messages, allowed=None, max_rounds=None, before_round=None, inbox=N
         yield use
         messages.append({"role": "assistant", "content": "".join(said) + call_text})
         feedback = f"Tool result for {name}: {result}"
+        ep = endpoints.get(name)
+        if ok and ep is not None and ep.ends_reply:
+            # ask_question: the reply waits on the user now, and anything the
+            # model wrote next would answer for them or repeat the question.
+            messages.append({"role": "user", "content": feedback})
+            return
         if "".join(said).strip():
             # It answered first and called afterwards (typically saving a
             # memory). Left alone, it writes the whole answer out again.

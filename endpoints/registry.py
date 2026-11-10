@@ -54,8 +54,11 @@ def param(kind, description, required=False, enum=None, default=None):
 
 class Endpoint:
     def __init__(self, fn, name, tier, description, params, returns, agent=None,
-                 scope=ASSISTANT, result_chars=None):
+                 scope=ASSISTANT, result_chars=None, ends_reply=False):
         self.fn = fn
+        # A call that worked ends the reply there: nothing the model wrote
+        # afterwards could help. ask_question, which waits on the user.
+        self.ends_reply = ends_reply
         self.name = name
         self.tier = tier
         self.description = description.strip()
@@ -123,10 +126,10 @@ class Endpoint:
 
 
 def endpoint(tier, description, params=None, returns=None, name=None, agent=None,
-             scope=ASSISTANT, result_chars=None):
+             scope=ASSISTANT, result_chars=None, ends_reply=False):
     def wrap(fn):
         ep = Endpoint(fn, name or fn.__name__, tier, description, params, returns, agent,
-                      scope, result_chars)
+                      scope, result_chars, ends_reply)
         register(ep)
         fn.endpoint = ep
         return fn

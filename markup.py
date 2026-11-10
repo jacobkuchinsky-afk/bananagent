@@ -428,6 +428,10 @@ def _link_span(label, target, style):
         return ("button", label, ("send", rest.strip() or label))
     if scheme == "copy":
         return ("button", label, ("copy", rest))
+    if scheme == "answer":
+        # An ask_question card's own buttons (dashboard.ChatPage): which
+        # question and which answer, not something a reply would write.
+        return ("button", label, ("answer", rest.strip()))
     return ("link", label, target, style)
 
 

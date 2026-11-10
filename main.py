@@ -97,6 +97,7 @@ import memory
 import prompts
 import triggers
 from dashboard import Dashboard
+from endpoints import questions
 from integrations import discord_bot
 from overlay import Overlay
 
@@ -154,6 +155,19 @@ def _asked(message):
         label = message[len(agents.NOTICE):].strip().split("\n", 1)[0].rstrip(".")
         return {"role": "notice", "text": label or "An agent reported back"}
     return {"role": "you", "text": message, "source": "memory"}
+
+
+def _question_plain(part):
+    """An ask_question call that worked, as plain text; None for anything else."""
+    if (part.get("kind", "tool") != "tool" or part.get("name") != "ask_question"
+            or part.get("status") != "ok" or not isinstance(part.get("args"), dict)):
+        return None
+    args = part["args"]
+    try:
+        return questions.as_plain(*questions.clean(args.get("question"), args.get("kind"),
+                                                   args.get("choices")))
+    except ValueError:
+        return None
 
 
 def _agent_runs():
@@ -390,11 +404,18 @@ class App:
             add_tool(reply["parts"], data)
             if overlay:
                 self.ui.set_status(_status_line(reply["parts"]))
+                asked = _question_plain(data)
+                if asked:
+                    # The overlay can't draw the question's buttons, so it
+                    # gets the question in words, to answer in the box.
+                    self.ui.set_state(Overlay.ANSWERING)
+                    self.ui.append(("\n\n" if reply["text"].strip() else "") + asked)
         elif kind == "done":
             reply["done"] = True
             if overlay:
                 self.ui.set_state(Overlay.ANSWERING)
-                self._autohide(6.0 + min(20.0, len(data) / 25.0))
+                asked = any(_question_plain(p) for p in reply["parts"])
+                self._autohide(45.0 if asked else 6.0 + min(20.0, len(data) / 25.0))
             self._next_notice()
         elif kind == "error":
             reply.update(text=data, done=True, error=True)
@@ -543,7 +564,8 @@ class App:
                 asked = asked.replace(" — you can see it)", ")")
             # Only a finished reply joins short-term memory — one that failed
             # or was cut off isn't something the model should think it said.
-            if reply:
+            # One that's only a tool call (a question, a reaction) still counts.
+            if reply or parts:
                 memory.remember(asked, "".join(reply), parts, sent_at)
 
             self.last_reply = round(time.time() - started, 2)

@@ -62,6 +62,7 @@ _home = None       # the chat the user last texted from: where "here" sends
 _active = {}       # channel id -> the Reply going out there right now
 _answered = {}     # channel id -> when it last sent something there
 _latest = {}       # channel id -> the user's latest message there, for reacting to
+_questions = {}    # message id -> the question asked in it (see ask)
 
 
 # -- signing in ------------------------------------------------------------------
@@ -102,6 +103,7 @@ def start():
         # @event decorator would register these under their own names instead.
         _client.on_ready = _on_ready
         _client.on_message = _on_message
+        _client.on_interaction = _on_interaction
         _loop, _error = asyncio.new_event_loop(), ""
         _ready.clear()
         _thread = threading.Thread(target=_run, args=(_client, _loop, token),
@@ -391,11 +393,12 @@ class Reply:
             self._buffer = ""
         self._push(None)
 
-    def send(self, content=None, path=None, timeout=None):
+    def send(self, content=None, path=None, timeout=None, view=None):
         """Send now, in order with the reply's own texts. Blocks; returns the
-        message id. For the endpoints, while this chat has a reply going out."""
+        message id. For the endpoints, while this chat has a reply going out.
+        `view` makes the message's buttons (see _send)."""
         future = concurrent.futures.Future()
-        self._push(("send", {"content": content, "path": path}, future, False))
+        self._push(("send", {"content": content, "path": path, "view": view}, future, False))
         return future.result(timeout or config.DISCORD_SEND_SECONDS)
 
     # the bot's side
@@ -511,7 +514,9 @@ def _messages(text):
     return out
 
 
-async def _send(channel, content=None, path=None, reference=None):
+async def _send(channel, content=None, path=None, reference=None, view=None):
+    """`view`, if given, is a function that makes the message's discord.ui.View:
+    a View has to be made on the bot's own loop, so it's built here."""
     import discord
 
     if not content and not path:
@@ -522,6 +527,8 @@ async def _send(channel, content=None, path=None, reference=None):
         kwargs["reference"] = reference
     if path:
         kwargs["file"] = discord.File(path)
+    if view is not None:
+        kwargs["view"] = view()
     msg = await channel.send(content or None, **kwargs)
     _answered[channel.id] = time.time()
     return msg
@@ -532,6 +539,162 @@ def _reference(channel, message_id):
 
     return discord.MessageReference(message_id=message_id, channel_id=channel.id,
                                     fail_if_not_exists=False)
+
+
+# -- questions (endpoints/questions.py) ------------------------------------------------
+# A question is a message with buttons. Choice: one per option, plus
+# "Something else…" for an answer of their own. Short and long: an Answer
+# button that opens Discord's pop-up form with a one-line or a paragraph box.
+# The button ids say what they are ("bq|c|2" is the third choice), and clicks
+# are handled in _on_interaction rather than by the View's own callbacks, so
+# a question asked before a restart still answers after one.
+_HINT = "-# tap to answer, or just text me"
+
+
+def _question_text(question, kind, choices):
+    text = f"**{_short(question, 1500)}**"
+    if kind == "choice" and any(len(c) > 80 for c in choices):
+        # Too long for a button label: list them, and number the buttons.
+        text += "\n" + "\n".join(f"{i}. {c}" for i, c in enumerate(choices, 1))
+    return text
+
+
+def _question_view(kind, choices):
+    import discord
+
+    view = discord.ui.View(timeout=None)
+    if kind == "choice":
+        numbered = any(len(c) > 80 for c in choices)
+        for i, c in enumerate(choices):
+            view.add_item(discord.ui.Button(
+                label=str(i + 1) if numbered else c, custom_id=f"bq|c|{i}",
+                style=discord.ButtonStyle.primary))
+        view.add_item(discord.ui.Button(label="Something else…", custom_id="bq|o",
+                                        style=discord.ButtonStyle.secondary))
+    else:
+        view.add_item(discord.ui.Button(
+            label="Answer" if kind == "short" else "Write my answer", emoji="✏️",
+            custom_id="bq|s" if kind == "short" else "bq|l",
+            style=discord.ButtonStyle.primary))
+    return view
+
+
+def ask(channel_id, question, kind, choices=()):
+    """Post a question to a chat, in order with the reply going out there if
+    there is one. Returns the message id."""
+    content = f"{_question_text(question, kind, choices)}\n{_HINT}"
+    make = lambda: _question_view(kind, list(choices))  # noqa: E731
+    reply = _active.get(channel_id)
+    if reply is not None and not reply._over:
+        mid = reply.send(content, view=make)
+    else:
+        async def go():
+            return (await _send(await _channel(channel_id), content=content, view=make)).id
+        mid = _call(go())
+    _questions[mid] = {"question": question, "kind": kind, "choices": list(choices)}
+    return mid
+
+
+def _asked_in(message):
+    """The question a message asked: from memory, or read back off the message
+    itself when the app has restarted since it went out."""
+    q = _questions.get(message.id)
+    if q is not None:
+        return q
+    lines = [l for l in (message.content or "").split("\n") if not l.startswith("-# ")]
+    question = lines[0].strip().strip("*") if lines else "(your question)"
+    listed = [re.sub(r"^\d+\.\s*", "", l) for l in lines[1:]]
+    choices = []
+    for row in message.components:
+        for item in getattr(row, "children", []):
+            cid = getattr(item, "custom_id", "") or ""
+            if cid.startswith("bq|c|"):
+                i = int(cid.rsplit("|", 1)[1])
+                choices.append(listed[i] if i < len(listed) else item.label)
+    kind = "choice" if choices else "short"
+    return {"question": question, "kind": kind, "choices": choices}
+
+
+def _answer_form(title, label, long, placeholder, on_submit):
+    import discord
+
+    class Form(discord.ui.Modal):
+        box = discord.ui.TextInput(
+            label=label, placeholder=placeholder or None, required=True,
+            style=discord.TextStyle.paragraph if long else discord.TextStyle.short,
+            max_length=4000 if long else 300)
+
+        async def on_submit(self, interaction):
+            await on_submit(interaction, self.box.value)
+
+        async def on_error(self, interaction, error):
+            print(f"[discord] answer form failed: {type(error).__name__}: {error}")
+
+    return Form(title=title)
+
+
+async def _on_interaction(interaction):
+    import discord
+
+    if interaction.type != discord.InteractionType.component:
+        return  # the answer forms handle their own submits (Form.on_submit)
+    cid = (interaction.data or {}).get("custom_id", "")
+    if not cid.startswith("bq|") or interaction.message is None:
+        return
+    if interaction.user.id not in _allowed:
+        await interaction.response.send_message(
+            "That question was for someone else.", ephemeral=True)
+        return
+    q = _asked_in(interaction.message)
+    if cid.startswith("bq|c|"):
+        i = int(cid.rsplit("|", 1)[1])
+        if i < len(q["choices"]):
+            await _answered_with(interaction, q, q["choices"][i])
+        return
+    long = cid == "bq|l"
+    question = q["question"]
+    # A form's box label holds 45 characters, so a longer question goes in
+    # its placeholder (100) instead; it's on the message right above anyway.
+    fits = len(question) <= 45
+    form = _answer_form(
+        title="Your answer" if cid != "bq|o" else "Something else",
+        label=question if fits else "Your answer",
+        long=long, placeholder=None if fits else _short(question, 100),
+        on_submit=lambda inter, value: _answered_with(inter, q, value))
+    await interaction.response.send_modal(form)
+
+
+async def _answered_with(interaction, q, answer):
+    """Show the answer on the question (and take its buttons away), then hand
+    it to the app as the user's next message."""
+    from endpoints.questions import answer_message
+
+    answer = str(answer).strip()
+    if not answer:
+        return
+    message = interaction.message
+    body = "\n".join(l for l in (message.content or "").split("\n") if not l.startswith("-# "))
+    try:
+        await interaction.response.edit_message(
+            content=f"{body}\n✅ {_short(answer, 300)}"[:LIMIT], view=None)
+    except Exception as e:
+        print(f"[discord] couldn't mark the question answered: {type(e).__name__}: {e}")
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    _questions.pop(message.id, None)
+    if _handler is None:
+        return
+    channel = interaction.channel
+    in_server = interaction.guild is not None
+    where = f"#{channel.name} in {interaction.guild.name}" if in_server else "DM"
+    text = answer_message(q["question"], answer)
+    head = f"(via Discord {where}" + (f", from {interaction.user.display_name})"
+                                      if in_server else ")")
+    set_home(channel.id)
+    print(f"[discord] {where}: answered {q['question'][:50]!r} with {answer[:60]!r}")
+    _handler(Incoming(channel_id=channel.id, message_id=message.id, where=where,
+                      text=text, prompt=f"{head}\n{text}", sent_at=time.time(),
+                      in_server=in_server))
 
 
 # -- for the endpoints ---------------------------------------------------------------

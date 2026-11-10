@@ -49,7 +49,7 @@ CHIP = ("Segoe UI", 12, "b")    # button labels
 SMALL = ("Segoe UI", 10, "b")
 HEADINGS = {1: 20, 2: 17, 3: 15, 4: 14, 5: 13, 6: 13}
 MATH_SIZE = 15                  # Cambria reads small next to Segoe UI at the same size
-ICONS = {"open": "↗", "run": "▶", "send": "➤", "copy": "⧉"}
+ICONS = {"open": "↗", "run": "▶", "send": "➤", "copy": "⧉", "answer": "➤"}
 OUTPUT_LINES = 40
 
 _ids = itertools.count()
@@ -240,7 +240,7 @@ class RichText:
         if kind == "close":
             self.runs.pop(action[1], None)
             return None
-        if kind == "send":
+        if kind in ("send", "answer"):
             return action
         return None
 
@@ -502,6 +502,8 @@ class RichText:
         kind = action[0]
         st = self.runs.get(key) or {}
         icon = ICONS.get(kind, "•")
+        if kind == "answer" and action[1].endswith(":type"):
+            icon = "✎"
         if kind == "run" and st.get("status") == "running":
             icon = "◌"
         if kind in ("copy",) and st.get("status") == "copied" and time.time() - st["at"] < 1.6:
@@ -519,6 +521,9 @@ class RichText:
             hit = (("copy", action[1], key), "Copies:\n" + _clip(action[1], 200))
         elif kind == "send":
             hit = (("send", action[1]), f"Sends “{_clip(action[1], 200)}”")
+        elif kind == "answer":
+            tip = "Opens a box to type your answer in" if action[1].endswith(":type")                 else f"Answers “{_clip(label, 200)}”"
+            hit = (("answer", action[1]), tip)
         else:
             where = markup.resolve(action[1])
             hit = (("open", action[1]), f"Opens {where or action[1]}")

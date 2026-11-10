@@ -39,12 +39,14 @@ import paint
 import prompts
 import richtext
 import subagents
+from endpoints import questions
 
 # -- palette -----------------------------------------------------------------
 PAGE = "#fff3ce"      # the window behind everything
 NAV = "#ffc93c"       # the side bar, same yellow as the orb
 CARD = "#ffffff"
 NOTICE_BG = "#f4ecd6"  # an agent reporting back, in the chat
+ASK_BG = "#fff8e1"     # a question the model asked, waiting on an answer
 INK = "#101010"
 MUTED = "#7d7059"
 ACCENT = "#e8a317"    # gauge arcs and the sparkline, against white
@@ -770,9 +772,84 @@ class ChatPage:
             said = f"Couldn't do that: {e}"
         if isinstance(said, tuple) and said[0] == "send":
             self.d.app.send(said[1], "chat")
+        elif isinstance(said, tuple) and said[0] == "answer":
+            self._answer(said[1])
         elif said:
             self._note = (said, rect[0], rect[3], time.time() + 3.0)
         return True
+
+    # -- questions (endpoints/questions.py) ------------------------------------
+    def _question(self, i, j):
+        """The ask_question call at chat[i].parts[j], as (part, question, kind,
+        choices), or None if that isn't one."""
+        chat = self.d.app.chat
+        try:
+            part = chat[i]["parts"][j]
+        except (IndexError, KeyError, TypeError):
+            return None
+        if part.get("kind") != "tool" or part.get("name") != "ask_question":
+            return None
+        args = part.get("args") if isinstance(part.get("args"), dict) else {}
+        try:
+            q, kind, choices = questions.clean(args.get("question"), args.get("kind"),
+                                               args.get("choices"))
+        except ValueError:
+            return None
+        return part, q, kind, choices
+
+    def _question_open(self, i, part):
+        """Still waiting: not answered with its buttons, and nothing said since."""
+        if part.get("answer") is not None:
+            return False
+        return not any(m["role"] == "you" for m in self.d.app.chat[i + 1:])
+
+    def _question_card(self, i, j):
+        """The question as markdown for a rich bubble: buttons while it's open,
+        the answer once it's been given."""
+        got = self._question(i, j)
+        if got is None:
+            return None
+        part, q, kind, choices = got
+        safe = lambda s: s.replace("[", "(").replace("]", ")")  # noqa: E731
+        text = f"**{q}**"
+        if self._question_open(i, part):
+            if kind == "choice":
+                buttons = [f"[{safe(c)}](answer:{i}:{j}:{n})" for n, c in enumerate(choices)]
+                buttons.append(f"[Something else…](answer:{i}:{j}:type)")
+                text += "\n\n" + "  ".join(buttons)
+            else:
+                label = "Type your answer" if kind == "short" else "Write your answer"
+                text += f"\n\n[{label}](answer:{i}:{j}:type)"
+        elif part.get("answer") is not None:
+            text += "\n\n✓ " + _clip(" ".join(str(part["answer"]).split()), 300)
+        elif kind == "choice":
+            text += "\n\n" + " · ".join(choices)
+        return text
+
+    def _answer(self, target):
+        """A click on a question's button: a choice is sent straight away; a
+        typed answer gets a box to write it in first."""
+        try:
+            i, j, which = target.split(":")
+            i, j = int(i), int(j)
+        except ValueError:
+            return
+        got = self._question(i, j)
+        if got is None or not self._question_open(i, got[0]):
+            return
+        part, q, kind, choices = got
+        if which == "type":
+            AnswerBox(self.d, q, long=kind == "long",
+                      on_send=lambda answer: self._give(i, part, q, answer))
+        elif which.isdigit() and int(which) < len(choices):
+            self._give(i, part, q, choices[int(which)])
+
+    def _give(self, i, part, question, answer):
+        answer = str(answer).strip()
+        if not answer or not self._question_open(i, part):
+            return
+        part["answer"] = answer
+        self.d.app.send(questions.answer_message(question, answer), "chat")
 
     def right_click(self, px, py):
         """A file link's right-click shows it in Explorer."""
@@ -833,6 +910,12 @@ class ChatPage:
             parts = msg.get("parts") or []
             texts = [j for j, p in enumerate(parts) if p["kind"] == "text" and p["text"].strip()]
             for j, part in enumerate(parts):
+                if part["kind"] == "tool" and part.get("name") == "ask_question" \
+                        and part.get("status") == "ok":
+                    card = self._question_card(i, j)
+                    if card is not None:
+                        yield ("ask", i, j), "rich", (card, False, ASK_BG)
+                        continue
                 if part["kind"] == "tool":
                     yield ("tool", i, j), "tool", part
                 elif part["text"].strip():
@@ -1109,6 +1192,90 @@ class ChatPage:
         x0, y0, x1, y1 = c.bbox(item)
         self._measured[item] = (text, wrap, x1 - x0, y1 - y0)
         return x1 - x0, y1 - y0
+
+
+class AnswerBox:
+    """A small window to type an answer to the model's question in: one line
+    for a short answer (Enter sends), a big box for a long one (ctrl+Enter
+    sends, Enter is a new line). Esc or Cancel closes it unsent."""
+
+    def __init__(self, dash, question, long, on_send):
+        self.on_send = on_send
+        px = dash._px
+        win = self.win = tk.Toplevel(dash.win)
+        win.withdraw()
+        win.title("Your answer")
+        win.configure(bg=PAGE)
+        win.transient(dash.win)
+        win.resizable(True, long)
+
+        body = tk.Frame(win, bg=PAGE, padx=px(18), pady=px(16))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=question, font=dash.f_value, bg=PAGE, fg=INK, justify="left",
+                 anchor="w", wraplength=px(460)).pack(fill="x")
+        frame = tk.Frame(body, bg=CARD, highlightthickness=px(2), highlightbackground=INK,
+                         highlightcolor=INK)
+        frame.pack(fill="both", expand=True, pady=(px(10), px(12)))
+        if long:
+            self.field = tk.Text(frame, font=dash.f_chat, bg=CARD, fg=INK, wrap="word",
+                                 height=9, width=52, relief="flat", bd=0,
+                                 insertbackground=INK, padx=px(10), pady=px(8),
+                                 selectbackground=NAV, selectforeground=INK, undo=True)
+            self.field.bind("<Control-Return>", lambda _e: self.send() or "break")
+            self.field.pack(fill="both", expand=True)
+            hint = "ctrl+Enter sends"
+        else:
+            self.field = tk.Entry(frame, font=dash.f_input, bg=CARD, fg=INK, width=40,
+                                  relief="flat", bd=0, insertbackground=INK,
+                                  selectbackground=NAV, selectforeground=INK)
+            self.field.bind("<Return>", lambda _e: self.send() or "break")
+            self.field.pack(fill="x", padx=px(10), pady=px(8))
+            hint = "Enter sends"
+
+        row = tk.Frame(body, bg=PAGE)
+        row.pack(fill="x")
+        tk.Label(row, text=hint, font=dash.f_label, bg=PAGE, fg=MUTED).pack(side="left")
+        for text, colour, command in (("Send", NAV, self.send), ("Cancel", CARD, self.close)):
+            tk.Button(row, text=text, command=command, font=dash.f_value, bg=colour, fg=INK,
+                      activebackground=colour, relief="solid", bd=px(2), padx=px(14),
+                      cursor="hand2").pack(side="right", padx=(px(8), 0))
+        win.bind("<Escape>", lambda _e: self.close())
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+        # Centred over the dashboard.
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        x = dash.win.winfo_rootx() + (dash.win.winfo_width() - w) // 2
+        y = dash.win.winfo_rooty() + (dash.win.winfo_height() - h) // 2
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.deiconify()
+        win.lift()
+        # The keyboard goes to the box once the click that opened it has
+        # finished putting focus back on the chat's own box.
+        win.after(60, self._focus)
+
+    def _focus(self):
+        try:
+            self.win.focus_force()
+            self.field.focus_set()
+        except tk.TclError:
+            pass
+
+    def send(self):
+        if isinstance(self.field, tk.Text):
+            text = self.field.get("1.0", "end").strip()
+        else:
+            text = self.field.get().strip()
+        if not text:
+            return
+        self.close()
+        self.on_send(text)
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
 
 
 class PromptFile:
