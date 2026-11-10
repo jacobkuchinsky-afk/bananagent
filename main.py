@@ -90,6 +90,7 @@ def _only_copy():
 
 import agents
 import brain
+import cloud_sync
 import config
 import endpoints
 import memory
@@ -174,6 +175,10 @@ class App:
     def __init__(self):
         self.ui = Overlay(on_submit=lambda text: self.send(text, "box"))
         self.events = queue.Queue()
+        # Pulls the latest memory from the other computers before anything
+        # below reads it, then keeps code and memory synced with GitHub. A code
+        # update from elsewhere restarts the app to run it (_update_restart).
+        cloud_sync.start(on_update=lambda files: self.events.put(("update", files)))
 
         self.gen = 0  # bumps every interaction; stale workers check it and bail
         self.key_down = False  # the hotkey auto-repeats while held; act once
@@ -248,6 +253,7 @@ class App:
                     pass
             discord_bot.stop()
             triggers.stop()
+            cloud_sync.stop()
             if self.restarting:
                 self._relaunch()
 
@@ -260,6 +266,20 @@ class App:
         print("[bananagent] restarting")
         self.restarting = True
         self.ui.root.quit()
+
+    def _update_restart(self):
+        """Code pulled from GitHub runs once the app restarts — but not in the
+        middle of a reply or an agent's job; it waits for those to finish."""
+        busy = [a.title for a in agents.all_agents() if a.busy()]
+        if self._replying() or self.notices or busy:
+            if not getattr(self, "_update_waiting", False):
+                self._update_waiting = True
+                print(f"[sync] code updated; restarting once "
+                      f"{', '.join(busy) or 'the reply'} is done")
+            self.ui.root.after(30000, self._update_restart)
+            return
+        print("[sync] restarting to run the code just pulled from GitHub")
+        self.restart()
 
     def _relaunch(self):
         # Always the windowless interpreter, the way login starts it, so the
@@ -338,6 +358,8 @@ class App:
             return self.ui.root.quit()
         if kind == "restart":
             return self.restart()
+        if kind == "update":
+            return self._update_restart()
         if kind == "notice":
             self.notices.append(payload)
             return self._next_notice()

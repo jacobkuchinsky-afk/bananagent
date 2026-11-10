@@ -258,6 +258,11 @@ DISCORD_ALLOWED_USERS = []
 # this many seconds of its last text there. DMs are always answered.
 DISCORD_ANSWER_IN_SERVERS = True
 DISCORD_FOLLOW_UP_SECONDS = 120
+# Server channels (ids: right-click the channel > Copy Channel ID) where it
+# answers everything you say there, no mention needed — like a DM.
+DISCORD_OPEN_CHANNELS = [
+    1468014551156002971,  # #general in BananaBot
+]
 # Files people send are saved here (relative to the app), a folder per day.
 DISCORD_FILES_DIR = "discord-files"
 DISCORD_DOWNLOAD_MAX_MB = 50
@@ -268,6 +273,30 @@ DISCORD_SHOW_IMAGES = True
 DISCORD_INLINE_TEXT_CHARS = 6000
 DISCORD_CONNECT_SECONDS = 30
 DISCORD_SEND_SECONDS = 30  # one send, before an endpoint gives up on it
+
+# --- Syncing between computers ------------------------------------------------
+# cloud_sync.py keeps every computer BananaGent runs on the same, through GitHub.
+# The code: changes here are committed and pushed to this folder's own repo once
+# the files have sat untouched for SYNC_CODE_QUIET_SECONDS and every changed .py
+# file compiles; updates there are pulled, and the app restarts itself to run
+# them (once nothing is mid-reply), installing requirements.txt if it changed.
+SYNC_CODE = True
+SYNC_CODE_SECONDS = 60
+SYNC_CODE_QUIET_SECONDS = 120
+SYNC_RESTART_ON_UPDATE = True
+SYNC_MAX_FILE_MB = 20  # a new file bigger than this holds up the push instead
+# The memory: these files, through a PRIVATE repo of their own — never the
+# public code repo. Merged, not overwritten, when two computers change them at
+# once. triggers.json stays per-computer: a synced reminder would go off twice.
+SYNC_MEMORY = True
+SYNC_MEMORY_REMOTE = "https://github.com/jacobkuchinsky-afk/bananagent-memory.git"
+SYNC_MEMORY_SECONDS = 30
+SYNC_MEMORY_FILES = [
+    "memory/MEMORY.md",
+    "memory/conversation.json",
+    "business/BUSINESS.md",
+    "business/data.json",
+]
 
 # --- Overlay ----------------------------------------------------------------
 # There's no panel: the window is fully transparent and only the orb, the text
@@ -282,3 +311,12 @@ OPACITY = 1.0
 
 FG = "#ffffff"
 # The orb's water colors live in water.py's PALETTES, keyed by state.
+
+# --- This computer only ---------------------------------------------------------
+# local_config.py (gitignored, so it isn't synced) overrides anything above for
+# one computer — e.g. DISCORD_ENABLED = False on all but one, or the bot answers
+# every text once per computer.
+try:
+    from local_config import *  # noqa: F401,F403
+except ImportError:
+    pass

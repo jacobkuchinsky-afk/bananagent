@@ -215,6 +215,10 @@ async def _on_message(message):
         return
     in_server = message.guild is not None
     if in_server and not _for_us(message):
+        # Logged, so "it didn't answer" can be told apart from "it never heard".
+        print(f"[discord] not for me (no mention or reply), so not answered: "
+              f"#{message.channel.name} in {message.guild.name}: "
+              f"{_short(message.clean_content, 60)!r}")
         return
     set_home(message.channel.id)
     _latest[message.channel.id] = message.id
@@ -229,11 +233,15 @@ async def _on_message(message):
 
 
 def _for_us(message):
-    """In a server, only what's said to the bot: a mention, a reply to one of
-    its messages, or a follow-up in a channel it's answering or just answered."""
+    """In a server, only what's said to the bot: a mention (of it, or of its
+    own role, which Discord's autocomplete often offers first), a reply to one
+    of its messages, a follow-up in a channel it's answering or just answered,
+    or anything in one of config.DISCORD_OPEN_CHANNELS."""
     if not config.DISCORD_ANSWER_IN_SERVERS:
         return False
-    if _client.user in message.mentions:
+    if message.channel.id in {int(c) for c in config.DISCORD_OPEN_CHANNELS}:
+        return True
+    if _client.user in message.mentions or _own_roles(message) & set(message.role_mentions):
         return True
     ref = message.reference
     if ref is not None and getattr(ref.resolved, "author", None) == _client.user:
@@ -242,11 +250,18 @@ def _for_us(message):
     return message.channel.id in _active or since < config.DISCORD_FOLLOW_UP_SECONDS
 
 
+def _own_roles(message):
+    """The bot's roles in that server, @everyone aside."""
+    return {r for r in message.guild.me.roles if not r.is_default()}
+
+
 async def _receive(message):
     in_server = message.guild is not None
     text = message.clean_content
     if in_server:
-        for name in {_client.user.name, message.guild.me.display_name}:
+        names = {_client.user.name, message.guild.me.display_name,
+                 *(r.name for r in _own_roles(message))}
+        for name in names:
             text = text.replace(f"@{name}", "")
         where = f"#{message.channel.name} in {message.guild.name}"
     else:

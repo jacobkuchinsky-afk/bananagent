@@ -82,15 +82,18 @@ def find_exe():
     native = os.path.join(home, ".local", "bin", "claude.exe")
     if os.path.exists(native):
         return native
-    # The desktop app is an MSIX package: %APPDATA%\Claude is redirected into
-    # its container, and only exists as that path for processes inside the
-    # app. From out here the files are under LocalAppData\Packages. Older
-    # versions keep claude.exe in claude-code\<version>\, newer ones one
+    # The desktop app keeps its copy in a place that moves between releases.
+    # It's an MSIX package, so %APPDATA%\Claude is redirected into its
+    # container, and only exists as that path for processes inside the app;
+    # from out here those files are under LocalAppData\Packages. Since 5.x
+    # it's in LocalAppData\Claude-Data\<package>\, outside the container.
+    # Older versions keep claude.exe in claude-code\<version>\, newer ones one
     # level down, in claude-code\<version>\<build hash>\.
+    local = os.environ.get("LOCALAPPDATA", "")
     roots = [os.path.join(os.environ.get("APPDATA", ""), "Claude", "claude-code")]
-    roots += glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Packages",
-                                    "Claude_*", "LocalCache", "Roaming", "Claude",
-                                    "claude-code"))
+    roots += glob.glob(os.path.join(local, "Claude-Data", "*", "claude-code"))
+    roots += glob.glob(os.path.join(local, "Packages", "Claude_*", "LocalCache", "Roaming",
+                                    "Claude", "claude-code"))
     bundled = []
     for root in roots:
         bundled += glob.glob(os.path.join(root, "*", "claude.exe"))

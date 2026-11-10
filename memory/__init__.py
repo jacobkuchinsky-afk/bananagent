@@ -17,7 +17,8 @@ Every config.MEMORY_REVIEW_EVERY messages, yours and its replies alike, the
 model is told to go back over them and save what it learned (see brain.py);
 memory/review.json keeps count across restarts.
 
-Both files hold personal details and are gitignored.
+Both files hold personal details and are gitignored. cloud_sync.py keeps them
+the same on every computer through a private repo of their own.
 """
 
 import json
@@ -176,6 +177,14 @@ def clear_conversation():
         _turns = []
         _save_turns()
         _set_since(0)
+
+
+def reload():
+    """Read the window from disk again on next use — after cloud_sync has
+    merged in messages from another computer."""
+    global _turns
+    with _lock:
+        _turns = None
 
 
 def short_term_tokens():

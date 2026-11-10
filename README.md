@@ -94,6 +94,40 @@ powershell -ExecutionPolicy Bypass -File install_startup.ps1
 At login it runs under `pythonw.exe` so no console window flashes up; anything it would
 have printed goes to `bananagent.log` in this folder.
 
+### On more than one computer
+
+`cloud_sync.py` keeps every copy the same through GitHub, from a background thread:
+
+- **Code.** Changes made on one computer are committed and pushed to this repo once the
+  files have been left alone for two minutes (`SYNC_CODE_QUIET_SECONDS`) and every changed
+  `.py` file compiles, so a half-done edit or a syntax error never reaches the others.
+  Every minute each copy pulls what the others pushed. If that changed anything, it
+  restarts itself to run it, but only once no reply or agent is in the middle of
+  something, and it runs `pip install -r requirements.txt` first if that file changed. If
+  two computers change the same lines, sync pauses and says so in `bananagent.log`;
+  `git pull --rebase` settles it.
+- **Memory.** `MEMORY.md`, the conversation, and the business notes (`SYNC_MEMORY_FILES`)
+  are personal, and this repo is public, so they go to a **private** repo of their own
+  (`SYNC_MEMORY_REMOTE`) through `.memory-sync.git`, a second git directory that tracks
+  only those files where they already are. Each copy pushes changes and pulls the
+  others' every 30 seconds, again at startup before anything is loaded, and once more on
+  quit. When two computers change memory at the same time, the changes are merged and
+  nothing is overwritten: markdown keeps both sides' new lines, the conversation is
+  merged message by message in time order, and business lists are merged item by item.
+  Reminders and file watches (`triggers.json`) stay on the computer they were set on,
+  because a synced reminder would go off twice.
+
+Setting up another computer:
+
+```bash
+git clone https://github.com/jacobkuchinsky-afk/bananagent.git
+```
+
+Then make the venv (see `requirements.txt`), copy `secrets.env` over by hand (it's never
+synced), and start it. The first start pulls the memory. Make a `local_config.py` next to
+`config.py` for settings that apply only to that computer. On every computer except one,
+put `DISCORD_ENABLED = False` in it, or each copy will answer every Discord text.
+
 ## The orb
 
 There's no panel. The window is fully transparent, so only the orb, the text box and
@@ -511,7 +545,8 @@ say they should be public.
 
 ## Memory
 
-Two kinds, in `memory/`. Both files hold personal details and are gitignored.
+Two kinds, in `memory/`. Both files hold personal details, so they're gitignored here and
+synced through a private repo instead (see *On more than one computer*).
 
 **Short-term** is the recent conversation: every message and reply, kept as a sliding
 window of the last ~20,000 tokens (`SHORT_TERM_TOKENS`) and sent with every request.

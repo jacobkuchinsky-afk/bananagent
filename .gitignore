@@ -51,3 +51,10 @@ agents/history/
 # The coding agent's sandbox: projects it builds, its Claude session ids and
 # the full logs of every exchange with Claude
 sandbox/
+
+# Settings for one computer only (see the end of config.py)
+local_config.py
+
+# cloud_sync.py's git directory for the memory, which goes to a private repo
+# of its own
+.memory-sync.git/
