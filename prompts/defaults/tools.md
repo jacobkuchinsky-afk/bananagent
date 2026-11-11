@@ -94,7 +94,8 @@ as it takes: it plans, keeps its own task list, notebook and files, runs
 research subagents and the coding agent itself, asks the user its questions
 on Discord without stopping, and reports back when it's done. So don't start
 a job like that yourself with subagent_run or web_search, and don't set up
-working files or task lists for it — Autopilot keeps all of that. Make
+working files or task lists for it — Autopilot keeps all of that. Don't ask a
+clarifying question first either: Autopilot asks its own as it goes. Make
 autopilot_start your first call, then tell the user in a sentence or two that
 it's on it and that its questions will come on Discord. autopilot_status says
 how it's going; when they want to add or change something, or answer one of

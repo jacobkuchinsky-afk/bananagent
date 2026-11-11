@@ -87,6 +87,17 @@ RETRIES = 6
 RETRY_SECONDS = 60
 
 
+# What a message handing over a long job tends to say. It only adds a nudge to
+# the assistant's message (context_note); the model still decides.
+LONG_JOB = re.compile(
+    r"\blong[\s-]*h[a-z]{0,4}z|\b(?:for|spend|next) (?:the next|a few |several |like )?(?:\d+|a few|few|"
+    r"several|couple(?: of)?) hours?\b|\bhours on (?:this|it)\b|\ball (?:day|night)\b|"
+    r"\bautonom|\bkeep (?:working|going|at it)\b|\bwork on (?:this|it) (?:for|until|all)\b|"
+    r"\btake as long\b|\bas long as it takes\b|\b(?:tons|lots|loads) of research\b|"
+    r"\bdeep research\b|\bwhile i'?m (?:away|gone|asleep|out)\b|\bovernight\b",
+    re.I)
+
+
 class _CycleOver(Exception):
     """Raised between rounds to end the current cycle."""
 
@@ -605,11 +616,21 @@ class AutopilotAgent(Agent):
             })
         return state
 
-    def context_note(self):
-        """A line for the assistant's model with every message, while there's a
-        job on: what it's doing, and the questions it's waiting on, so a plain
-        text that answers one can be passed on (see brain._context_notes)."""
+    def context_note(self, text=""):
+        """A line for the assistant's model with a message (see
+        brain._context_notes). While there's a job on: what it's doing, and
+        the questions it's waiting on, so a plain text that answers one can be
+        passed on. With none on, a message that reads like a long job gets a
+        nudge to hand it over: left to itself the model asked a clarifying
+        question or ran a research subagent inline 6 times in 8."""
         job = self.job
+        if not self.busy() and LONG_JOB.search(str(text or "")):
+            return ("This message reads like a long job. Unless it's something you "
+                    "can finish in a reply or two, make autopilot_start your first call, "
+                    "with their whole request in their words — don't ask a clarifying "
+                    "question first or start the research yourself: Autopilot plans it, "
+                    "asks the user its own questions on Discord as it goes, and keeps "
+                    "working for as long as it takes.")
         if job is None or (not self.busy() and not job.open_questions()):
             return None
         c = job.counts()

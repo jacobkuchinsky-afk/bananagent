@@ -265,10 +265,11 @@ class Inbox:
 
 # Things the model should know with every message that aren't part of the
 # conversation — Autopilot's job and the questions it's waiting on. Any agent
-# with a context_note() method returning a line (or None) adds one. Like
+# with a context_note(text) method — given the user's message, returning a
+# line or None — adds one. Like
 # REVIEW, the note rides on the message sent to the model only; the window
 # keeps what the user actually said.
-def _context_notes():
+def _context_notes(text=""):
     import agents  # here, not at the top: agents import brain
 
     lines = []
@@ -277,7 +278,7 @@ def _context_notes():
         if fn is None:
             continue
         try:
-            line = fn()
+            line = fn(text)
         except Exception as e:
             print(f"[brain] a context note failed: {e}")
             continue
@@ -309,7 +310,7 @@ def reply(text, sent_at=None, images=None, inbox=None):
     """
     review = memory.review_due()
     note = REVIEW.format(n=config.MEMORY_REVIEW_EVERY) if review else ""
-    note += _context_notes()
+    note += _context_notes(text)
     if review:
         print("[brain] memory review due; asking the model to save what it learned")
     asked = {"role": "user", "content": memory.stamp(sent_at or time.time(),
