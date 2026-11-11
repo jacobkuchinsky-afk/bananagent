@@ -263,6 +263,34 @@ class Inbox:
             return late
 
 
+# Things the model should know with every message that aren't part of the
+# conversation — Autopilot's job and the questions it's waiting on. Each is a
+# function returning a line or None. Like REVIEW, the note rides on the message
+# sent to the model only; the window keeps what the user actually said.
+_CONTEXT_NOTES = []
+
+
+def context_note(fn):
+    _CONTEXT_NOTES.append(fn)
+    return fn
+
+
+def _context_notes():
+    lines = []
+    for fn in _CONTEXT_NOTES:
+        try:
+            line = fn()
+        except Exception as e:
+            print(f"[brain] a context note failed: {e}")
+            continue
+        if line:
+            lines.append(line)
+    if not lines:
+        return ""
+    return ("\n\n[Status note from BananaGent itself, not the user, who can't see it. "
+            "Don't bring it up unless it bears on their message. " + " ".join(lines) + "]")
+
+
 def reply(text, sent_at=None, images=None, inbox=None):
     """Answer one message from the user, yielding the reply a chunk at a time.
 
@@ -283,6 +311,7 @@ def reply(text, sent_at=None, images=None, inbox=None):
     """
     review = memory.review_due()
     note = REVIEW.format(n=config.MEMORY_REVIEW_EVERY) if review else ""
+    note += _context_notes()
     if review:
         print("[brain] memory review due; asking the model to save what it learned")
     asked = {"role": "user", "content": memory.stamp(sent_at or time.time(),

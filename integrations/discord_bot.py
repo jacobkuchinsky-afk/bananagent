@@ -210,6 +210,11 @@ class Incoming:
     in_server: bool
     files: list = field(default_factory=list)   # where the attachments were saved
     images: list = field(default_factory=list)  # base64, for the model to see
+    # When this answers one of the bot's messages — a question's button or
+    # form, or a Discord reply to it: that message's id, and the answer alone.
+    # It's how an answer to a question Autopilot asked finds its way back.
+    answer_to: int = None
+    answer: str = None
 
 
 async def _on_message(message):
@@ -289,10 +294,14 @@ async def _receive(message):
             images.append(image)
     shown = text or ("(sent " + ", ".join(os.path.basename(p) for p in files) + ")"
                      if files else "(empty message)")
+    answer_to = None
+    if quoted is not None and getattr(quoted, "author", None) == _client.user:
+        answer_to = quoted.id
     return Incoming(channel_id=message.channel.id, message_id=message.id, where=where,
                     text=shown, prompt="\n".join(lines),
                     sent_at=message.created_at.timestamp(), in_server=in_server,
-                    files=files, images=images)
+                    files=files, images=images, answer_to=answer_to,
+                    answer=text if answer_to else None)
 
 
 async def _save(att, message_id, want_image=True):
@@ -694,7 +703,7 @@ async def _answered_with(interaction, q, answer):
     print(f"[discord] {where}: answered {q['question'][:50]!r} with {answer[:60]!r}")
     _handler(Incoming(channel_id=channel.id, message_id=message.id, where=where,
                       text=text, prompt=f"{head}\n{text}", sent_at=time.time(),
-                      in_server=in_server))
+                      in_server=in_server, answer_to=message.id, answer=answer))
 
 
 # -- for the endpoints ---------------------------------------------------------------
@@ -776,6 +785,19 @@ def _describe(channel):
         return f"#{channel.name} in {channel.guild.name}"
     who = getattr(channel, "recipient", None)
     return f"DM with {who.display_name if who else 'someone'}"
+
+
+def channel_for(to=None):
+    """A chat's id from the same names send() takes; "home" is where the
+    user last texted from, or a DM with them if they haven't yet."""
+    to = str(to or "").strip()
+    if to.lower() == "home":
+        to = "" if _home is not None else "me"
+
+    async def go():
+        return (await _resolve(to)).id
+
+    return _call(go())
 
 
 def send(to=None, text=None, path=None):

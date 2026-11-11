@@ -1352,6 +1352,9 @@ def prompt_files():
     files.append(PromptFile("coder", "Coding agent", agents.coder.PROMPT,
                             "the coding agent's prompt: how it runs a job and briefs "
                             "Claude Code; {{tools}} becomes its tool list"))
+    files.append(PromptFile("autopilot", "Autopilot", agents.autopilot.PROMPT,
+                            "Autopilot's prompt, for long jobs worked in cycles; "
+                            "{{tools}} becomes its tool list"))
     return files
 
 

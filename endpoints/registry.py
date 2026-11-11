@@ -36,6 +36,9 @@ MINOR = "minor"  # only reads and reports; calling it changes nothing
 # left out of the assistant's catalog and refused if it calls one anyway.
 ASSISTANT = "assistant"
 CODER = "coder"
+# Autopilot's own tools — its task list, notebook, questions and checkpoints
+# (endpoints/autopilot.py) — which mean nothing outside one of its jobs.
+AUTOPILOT = "autopilot"
 # Part of the call protocol rather than a job — keep_going — so every scope
 # gets it, and every catalog lists it.
 EVERYONE = "everyone"

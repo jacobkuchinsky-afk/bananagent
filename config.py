@@ -182,6 +182,50 @@ SANDBOX_RUN_SECONDS = 120
 SANDBOX_RUN_MAX_SECONDS = 600
 SANDBOX_OUTPUT_CHARS = 6000
 
+# --- Autopilot: long jobs ----------------------------------------------------------
+# agents/autopilot.py works on one big or open-ended job for hours, in cycles:
+# each cycle is a fresh conversation built from the job's saved state (plan,
+# tasks, notebook, questions, journal — workbench/), and ends with a handoff
+# note for the next. That's what lets a job run far longer than one context.
+#
+# One cycle's whole conversation, system prompt included, in characters. Kept
+# well under NUM_CTX * CHARS_PER_TOKEN, since JSON and code run denser than 4
+# characters a token. Past 60% older tool results are shortened; past 85% it's
+# told to checkpoint; past 95% the cycle is ended and the handoff written for it.
+AUTOPILOT_CONTEXT_CHARS = 100000
+AUTOPILOT_KEEP_RECENT = 8      # messages at the end of a cycle never shortened
+# Tool calls in one cycle before it's asked to checkpoint and step back to
+# re-plan — the "loop into itself" — and the hard stop a few calls later.
+AUTOPILOT_CYCLE_CALLS = 20
+AUTOPILOT_CYCLE_GRACE = 4
+# Limits on one whole job. It also finishes when it says it's done (and has
+# checked), when it's stopped, or when its deadline passes.
+AUTOPILOT_MAX_CALLS = 600
+AUTOPILOT_MAX_HOURS = 24
+# The longest a checkpoint may wait for Jacob to answer before starting the
+# next cycle anyway (it can keep working on other tasks meanwhile).
+AUTOPILOT_WAIT_MAX_MINUTES = 90
+# Where its questions and updates go on Discord: "home" is the chat you last
+# texted it from, falling back to a DM; or "me", "#channel", or an id.
+AUTOPILOT_DISCORD_TO = "home"
+# Fewest seconds between two progress updates it texts you.
+AUTOPILOT_UPDATE_GAP_SECONDS = 600
+# A job that was running when BananaGent quit or restarted picks up again
+# when it starts.
+AUTOPILOT_RESUME_ON_START = True
+# The assistant's own tools it may use, besides its own (endpoints/autopilot.py)
+# and every tool the coding agent has made. Nothing that approves another
+# agent's gated step for you, sends email, or changes this app is here.
+AUTOPILOT_TOOLS = [
+    "get_time", "web_search", "subagent_run",
+    "code_do", "code_status", "code_stop",
+    "browser_do", "browser_status", "browser_stop",
+    "drive", "read_drive", "classroom",
+    "memory_read", "memory_add",
+    "business_read", "business_note", "business_log", "business_task_add",
+    "business_task_update",
+]
+
 # --- Deploying ------------------------------------------------------------------
 # Apps go online on Vercel, with Postgres from Neon — one Neon project per app.
 # The keys are in secrets.env (gitignored); see workspace.cloud_env(). Both
@@ -296,6 +340,10 @@ SYNC_MEMORY_FILES = [
     "memory/conversation.json",
     "business/BUSINESS.md",
     "business/data.json",
+    # The keys (Vercel, Neon, Gmail, Google, Discord), so a new computer has
+    # them from its first start. Only ever in the private repo: as safe as the
+    # GitHub account is.
+    "secrets.env",
 ]
 
 # --- Overlay ----------------------------------------------------------------

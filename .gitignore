@@ -58,3 +58,7 @@ local_config.py
 # cloud_sync.py's git directory for the memory, which goes to a private repo
 # of its own
 .memory-sync.git/
+
+# Autopilot's long jobs (workbench/): each job's plan, task list, notebook,
+# questions, journal and the files it made — personal, and per-computer
+workbench/jobs/

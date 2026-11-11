@@ -241,6 +241,9 @@ class App:
 
         endpoints.bind(self)  # lets endpoints act on the running app
         triggers.start()
+        if config.AUTOPILOT_RESUME_ON_START:
+            # A little after startup, so Discord is signed in for its questions.
+            threading.Timer(20.0, agents.get("autopilot").resume_on_start).start()
         self._hook_keys()
         if config.WARM_ON_START:
             threading.Thread(target=self._warm_up, daemon=True).start()
@@ -284,7 +287,10 @@ class App:
     def _update_restart(self):
         """Code pulled from GitHub runs once the app restarts — but not in the
         middle of a reply or an agent's job; it waits for those to finish."""
-        busy = [a.title for a in agents.all_agents() if a.busy()]
+        # Autopilot's long jobs are saved as they go and pick up again after
+        # a restart, so they don't hold an update back for hours.
+        busy = [a.title for a in agents.all_agents()
+                if a.busy() and not getattr(a, "restartable", False)]
         if self._replying() or self.notices or busy:
             if not getattr(self, "_update_waiting", False):
                 self._update_waiting = True
@@ -450,6 +456,8 @@ class App:
         """A text from Discord (a discord_bot.Incoming). One to the chat a reply
         is already going out to joins that reply — the model takes it in
         mid-answer and nothing is cut off. Anything else starts a reply of its own."""
+        if self._to_autopilot(msg):
+            return
         turn = self.discord_turn
         if (turn is not None and self._replying() and turn.channel_id == msg.channel_id
                 and turn.inbox.put(msg.prompt, msg.sent_at, msg.images, msg)):
@@ -459,6 +467,28 @@ class App:
                              {"role": "you", "text": msg.text, "source": "discord"})
             return
         self.send(msg.prompt, "discord", incoming=msg)
+
+    def _to_autopilot(self, msg):
+        """An answer to one of Autopilot's questions — a tap on its buttons,
+        its form, or a Discord reply to it — goes straight to the job, not to
+        the assistant. True if it was one."""
+        pilot = agents.get("autopilot")
+        if not msg.answer_to or not pilot.owns(msg.answer_to):
+            return False
+        try:
+            pilot.receive(msg.answer or msg.text, message_id=msg.answer_to)
+        except Exception as e:
+            print(f"[autopilot] couldn't take an answer: {e}")
+            return False
+        print(f"\n[you, via discord, to autopilot] {msg.text}")
+        at = len(self.chat) - 1 if self._replying() else len(self.chat)
+        self.chat[at:at] = [{"role": "you", "text": msg.text, "source": "discord"},
+                            {"role": "notice", "text": "Passed to Autopilot"}]
+        if msg.message_id != msg.answer_to:
+            # A typed reply, which nothing else marks as received.
+            threading.Thread(target=lambda: discord_bot.react(
+                msg.message_id, "👍", str(msg.channel_id)), daemon=True).start()
+        return True
 
     def send(self, text, source, incoming=None):
         """One message in, from the ` box ("box"), the Chat tab ("chat"),

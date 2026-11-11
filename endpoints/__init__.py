@@ -15,6 +15,7 @@ import pkgutil
 
 from .registry import (  # noqa: F401  (re-exported for endpoint modules to use)
     ASSISTANT,
+    AUTOPILOT,
     CODER,
     EVERYONE,
     MAJOR,

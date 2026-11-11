@@ -123,8 +123,8 @@ Setting up another computer:
 git clone https://github.com/jacobkuchinsky-afk/bananagent.git
 ```
 
-Then make the venv (see `requirements.txt`), copy `secrets.env` over by hand (it's never
-synced), and start it. The first start pulls the memory. Make a `local_config.py` next to
+Then make the venv (see `requirements.txt`) and start it. The first start pulls the memory
+and `secrets.env`, the keys, which sync through the same private repo (never this one). Make a `local_config.py` next to
 `config.py` for settings that apply only to that computer. On every computer except one,
 put `DISCORD_ENABLED = False` in it, or each copy will answer every Discord text.
 
@@ -542,6 +542,82 @@ say they should be public.
 - The URL `vercel deploy` prints is that one deployment's, and it's behind
   Vercel's login (it answers 302). Your link is the production alias that
   `vercel inspect` lists, such as `https://hello-neon-mu.vercel.app`.
+
+### Autopilot: long jobs
+
+The coding agent holds one job in one conversation. Autopilot is for jobs that
+won't fit in one: *"research the best note apps and write me a comparison"*,
+*"plan the trip down to the bookings"*, *"work on this for the next three
+hours"*. It keeps going on its own, in the background, until the goal is met
+and checked — however simple or wide the job is.
+
+**The job lives on disk, not in the context.** `workbench/jobs/<name>/job.json`
+holds the goal, a plan, a task list (`t1`, `t2`… todo, doing, done, blocked or
+dropped, with notes and sub-tasks), a quick-jot notebook (`n1`, `n2`…), every
+question it asked you with your answer, and a journal. What it makes goes in
+`files/` beside it. All of it is gitignored. Every change is saved the moment
+the tool that made it runs.
+
+**It works in cycles.** Each cycle is a fresh conversation that opens with a
+brief built from the saved job: goal, plan, tasks, questions and answers, the
+newest notes, and the last few journal entries. It re-plans, picks the next
+task, works it with its tools, ticks it off, and ends the cycle with
+`checkpoint`, a handoff saying what got done and what's next. The next cycle
+starts from that. This is how it loops back on itself and decides what to do
+next, rather than carrying on from a context full of stale tool output.
+
+**The context manager** runs before every request to the model
+(`AutopilotAgent._between`). Past 60% of `AUTOPILOT_CONTEXT_CHARS`, older
+tool results are shortened. Past 85%, or after `AUTOPILOT_CYCLE_CALLS` calls,
+it's told to checkpoint. Past 95%, or a few calls later, the cycle is ended for
+it and a separate model call writes the handoff from the cycle's log. Nothing
+is lost when that happens, since tasks, notes and answers were already saved.
+
+**Questions don't stop it.** `question_ask` posts the question to you on Discord
+(buttons for choices, a form otherwise), marks the task that needs it blocked,
+and the job carries on with something else. Tap a button, fill the form, or
+reply to the question message, and the answer goes straight to the job
+(`main.py` routes it by the question's message id), not to the assistant. The
+blocked task is freed and the answer is in front of the model before its next
+step. If you just text normally, the assistant is told which questions are open
+and passes your answer on with `autopilot_message`. With everything waiting on
+you, a checkpoint can sleep until you answer (`wait_minutes`). Without Discord,
+the question comes up through the assistant in the chat. `update_user` texts you
+a progress note at real milestones, at most every
+`AUTOPILOT_UPDATE_GAP_SECONDS`.
+
+**It finishes reluctantly.** `job_finish` is refused while any task is still
+todo or doing. The first "done" is sent back with a prompt to re-read the goal
+and look for what's missing. If you gave it hours (*"keep at it for 3 hours"*),
+it's sent back twice while there's time left. A job also ends at
+`AUTOPILOT_MAX_CALLS` tool calls or `AUTOPILOT_MAX_HOURS`, with a report of
+where it got to.
+
+**It uses the rest of BananaGent:** web search, research and worker subagents,
+the coding agent and the browsing agent, Drive and Classroom, memory and the
+business record (`AUTOPILOT_TOOLS` in `config.py`). An agent it starts reports
+back to it instead of to you (`Agent.owner`). A step one of them wants approved
+still comes to you, since those gates are for a person. It has no email,
+nothing that approves another agent's step, and nothing that changes the app.
+
+**Restarts.** A job that was running when BananaGent quit picks up again 20s
+after it starts (`AUTOPILOT_RESUME_ON_START`), so a code update from
+`cloud_sync` doesn't wait hours for a job to end. Stopped and finished jobs can
+be picked up again by name.
+
+From the assistant it's four tools:
+
+| Endpoint | Does |
+|---|---|
+| `autopilot_start(goal, job, hours)` | Starts a job, or picks up an earlier one by name |
+| `autopilot_status()` | Plan, tasks, open questions, recent journal, earlier jobs |
+| `autopilot_message(text, question)` | Your answer to a question (by id), or new instructions |
+| `autopilot_stop()` | Stops it; everything is kept |
+
+Its own 13 tools (scope `autopilot`, `endpoints/autopilot.py`): `plan_write`,
+`todo_add`, `todo_update`, `todo_list`, `jot`, `notebook_read`, `question_ask`,
+`update_user`, `file_write`, `file_read`, `files_list`, `checkpoint` and
+`job_finish`. Its prompt is `agents/autopilot.md`, editable on the Prompts tab.
 
 ## Memory
 

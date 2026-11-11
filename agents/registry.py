@@ -98,6 +98,9 @@ class Agent:
         # so a chat line that started a run can find it again (see run_view).
         self.run = None
         self._runs = collections.OrderedDict()  # run id -> that run's state
+        # Who hears when this run finishes, if not the app: Autopilot, for an
+        # agent it started itself (see announce). Cleared by every start().
+        self.owner = None
         self._thread = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -147,6 +150,7 @@ class Agent:
             # run's lines stay readable under its own id.
             self.activity = collections.deque(maxlen=60)
             self.run = uuid.uuid4().hex[:12]
+            self.owner = None
             self._runs[self.run] = {"activity": self.activity}
             while len(self._runs) > KEEP_RUNS:
                 self._runs.popitem(last=False)
@@ -326,6 +330,16 @@ def announce(agent, event):
         label, message = agent.report(event)
     except Exception:
         traceback.print_exc()
+        return
+    owner = agent.owner
+    if owner is not None and event == "finished":
+        # Another agent started this run and is waiting on it, so the news is
+        # its. Only the finish: a step waiting on approval is still the
+        # user's to approve, whoever started the run.
+        try:
+            owner(agent, event, label, message)
+        except Exception:
+            traceback.print_exc()
         return
     for fn in list(_LISTENERS):
         try:
