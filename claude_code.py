@@ -30,6 +30,7 @@ import collections
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -46,7 +47,10 @@ BananaGent sends you tasks and reads your replies; no person is watching this \
 terminal, and nobody can answer a question in the middle of your turn.
 
 - Work inside the current directory, which is this project's folder in \
-BananaGent's sandbox. Don't read or change anything outside it.
+BananaGent's sandbox. Don't change anything outside it. The one exception for \
+reading: {read_dirs} hold what BananaGent's other agents (Autopilot jobs) made. \
+You may read anything there, by full path, and copy what the task needs into \
+this folder — but never edit, move or delete anything there.
 - If something is ambiguous, pick the most sensible option, say what you assumed, \
 and carry on. Only stop to ask when a wrong guess would waste most of the work.
 - Verify your own work whenever you can: run the code, run the tests, and report \
@@ -105,6 +109,23 @@ def find_exe():
         return tuple(int(x) if x.isdigit() else 0 for x in name.split("."))
 
     return max(bundled, key=version) if bundled else None
+
+
+def driver_note():
+    return DRIVER_NOTE.replace("{read_dirs}", " and ".join(workspace.READ_ROOTS) or "(none)")
+
+
+def read_rules():
+    """Permission rules letting Claude read (never write) workspace.READ_ROOTS.
+    Claude Code matches absolute paths as //path, with a Windows drive written
+    POSIX-style: C:\\x becomes //c/x."""
+    rules = []
+    for root in workspace.READ_ROOTS:
+        p = root.replace("\\", "/")
+        if re.match(r"^[A-Za-z]:/", p):
+            p = "/" + p[0].lower() + p[2:]
+        rules.append(f"Read(/{p}/**)")
+    return rules
 
 
 def _env():
@@ -250,7 +271,7 @@ class Session:
         before = workspace.snapshot(self.project)
         cmd = [exe, "-p", "--output-format", "stream-json", "--verbose",
                "--permission-mode", config.CLAUDE_PERMISSION_MODE,
-               "--append-system-prompt", DRIVER_NOTE]
+               "--append-system-prompt", driver_note()]
         if config.CLAUDE_MODEL:
             cmd += ["--model", config.CLAUDE_MODEL]
         if config.CLAUDE_EFFORT:
@@ -262,7 +283,7 @@ class Session:
         allowed = (list(config.CLAUDE_ALLOWED_TOOLS)
                    + [f"{tool}({c})" for c in config.CLAUDE_ALLOWED_COMMANDS
                       for tool in ("Bash", "PowerShell")]
-                   + allowed_rules(self.project))
+                   + read_rules() + allowed_rules(self.project))
         if allowed:
             cmd += ["--allowedTools", *allowed]
         denied = [f"{tool}({c})" for c in config.CLAUDE_DENIED_COMMANDS

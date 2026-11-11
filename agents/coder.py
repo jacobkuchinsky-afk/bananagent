@@ -199,6 +199,7 @@ class CoderAgent(Agent):
         others = [p["name"] for p in workspace.projects() if p["name"] != self.project][:12]
         if others:
             lines.append(f"\nOther projects in the sandbox: {', '.join(others)}")
+        lines += _shared_files(self.project)
         lines.append("\nStart by making a plan with coding_plan, then brief Claude.")
         return "\n".join(lines)
 
@@ -304,6 +305,31 @@ class CoderAgent(Agent):
             "tool_calls": self.calls,
         })
         return state
+
+
+def _shared_files(project):
+    """Brief lines on what the agent can read outside the sandbox: Autopilot's
+    job folders, and the files of the job running now (which is most likely
+    the one that started this task)."""
+    if not workspace.READ_ROOTS:
+        return []
+    lines = ["\nAutopilot's job folders, which you and Claude can read (never write) by full "
+             f"path: {', '.join(workspace.READ_ROOTS)}. sandbox_list, sandbox_read and "
+             "sandbox_search take those paths; sandbox_import copies files from there into "
+             "the project."]
+    try:
+        from .registry import get
+        pilot = get("autopilot")
+        job = pilot.job if pilot.busy() else None
+    except Exception:
+        job = None
+    if job is not None:
+        folder = os.path.join(job.dir, "files")
+        listing = workspace.tree(project, folder, depth=2, limit=40) \
+            if os.path.isdir(folder) else "(empty)"
+        lines.append(f"Autopilot is running the job '{job.slug}' now; if this task came from "
+                     f"it, its files are in {folder}:\n{listing}")
+    return lines
 
 
 def _name_from(task):

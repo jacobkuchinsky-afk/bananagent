@@ -9,7 +9,11 @@
 
 Everything here takes a project name and a path inside it. Paths are resolved
 against the project folder and refused if they land outside the sandbox, so a
-model that writes "..\\..\\Windows" gets an error instead of a file. That's a
+model that writes "..\\..\\Windows" gets an error instead of a file. The one
+exception is reading: the folders in READ_ROOTS (Autopilot's job folders) can
+be listed, read, searched and copied into a project by full path, so the
+coding agent can pick up what other agents made without anyone approving it.
+Nothing outside the sandbox is ever written. That's a
 guard against mistakes, not a security boundary: sandbox_run executes real
 commands, which can reach anywhere the user can. Commands that look like they
 reach outside, delete a lot, change the system or publish something are caught
@@ -20,6 +24,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 
@@ -29,6 +34,9 @@ APP = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(APP, config.SANDBOX_DIR))
 META = os.path.join(ROOT, ".banana")
 LOGS = os.path.join(META, "logs")
+# Folders outside the sandbox the coding agent (and Claude under it) may read
+# but never write: what Autopilot's jobs make (workbench/jobs/<job>/files/).
+READ_ROOTS = [os.path.abspath(os.path.join(APP, p)) for p in config.CODER_READ_DIRS]
 
 # Never listed, searched or diffed: dependencies and caches drown out the
 # files that matter, and .banana is ours.
@@ -169,9 +177,43 @@ def resolve(project, path="."):
     return full
 
 
+def _inside(full, root):
+    full, root = os.path.realpath(full).lower(), os.path.realpath(root).lower()
+    try:
+        return os.path.commonpath([full, root]) == root
+    except ValueError:  # different drives
+        return False
+
+
+def readable(path):
+    """The read-only root a full path is inside, or None."""
+    return next((r for r in READ_ROOTS if _inside(path, r)), None)
+
+
+def resolve_read(project, path="."):
+    """Like resolve(), but a full path inside one of READ_ROOTS is fine too.
+    For listing, reading and searching only — never for writing."""
+    raw = str(path or ".").strip().strip('"').strip("'")
+    if os.path.isabs(raw):
+        full = os.path.realpath(raw)
+        if readable(full):
+            return full
+    try:
+        return resolve(project, path)
+    except ValueError:
+        roots = " or ".join(READ_ROOTS)
+        raise ValueError(f"'{path}' is outside the sandbox. You can read inside "
+                         f"{os.path.realpath(ROOT)}, or{' ' + roots if roots else ''} "
+                         f"by full path.") from None
+
+
 def shown(project, full):
-    """How a path is shown to the model: relative to the project, / separated."""
-    rel = os.path.relpath(full, project_dir(project))
+    """How a path is shown to the model: relative to the project, / separated.
+    A file outside the project (in a read-only folder) keeps its full path."""
+    base = project_dir(project)
+    if not _inside(full, base):
+        return full
+    rel = os.path.relpath(full, base)
     return "." if rel == "." else rel.replace("\\", "/")
 
 
@@ -185,7 +227,7 @@ def _walk(top):
 # -- reading ------------------------------------------------------------------
 def tree(project, path=".", depth=3, limit=250):
     """The folder as an indented listing, files with their sizes."""
-    top = resolve(project, path)
+    top = resolve_read(project, path)
     if not os.path.exists(top):
         raise FileNotFoundError(f"{path} doesn't exist yet.")
     if os.path.isfile(top):
@@ -210,7 +252,7 @@ def tree(project, path=".", depth=3, limit=250):
 
 def read(project, path, start=1, lines=250):
     """Part of a text file, numbered, so edits and feedback can cite lines."""
-    full = resolve(project, path)
+    full = resolve_read(project, path)
     if not os.path.isfile(full):
         raise FileNotFoundError(f"{path} isn't a file.")
     with open(full, encoding="utf-8", errors="replace") as f:
@@ -225,7 +267,7 @@ def read(project, path, start=1, lines=250):
 
 def search(project, pattern, path=".", glob=None, limit=80):
     """Lines matching a regex (or plain text, if it isn't one) across files."""
-    top = resolve(project, path)
+    top = resolve_read(project, path)
     try:
         rx = re.compile(pattern, re.I)
     except re.error:
@@ -284,6 +326,48 @@ def edit(project, path, find, replace):
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(text.replace(find, replace, 1))
     return {"path": shown(project, full), "replaced": 1}
+
+
+IMPORT_MAX_FILES = 500
+IMPORT_MAX_MB = 200
+
+
+def import_files(project, source, dest=".", overwrite=False):
+    """Copy a file or folder from a read-only folder (READ_ROOTS) into the
+    project. The source is only read; existing project files are kept unless
+    overwrite is set."""
+    src = os.path.realpath(str(source or "").strip().strip('"').strip("'"))
+    if not os.path.isabs(str(source or "").strip().strip('"').strip("'")) or not readable(src):
+        raise ValueError(f"Give the full path of a file or folder inside "
+                         f"{' or '.join(READ_ROOTS)}.")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"There's nothing at {src}.")
+    target = resolve(project, dest)
+    if os.path.isfile(src):
+        pairs = [(src, os.path.join(target, os.path.basename(src))
+                  if os.path.isdir(target) or str(dest).endswith(("/", "\\")) or dest == "."
+                  else target)]
+    else:
+        pairs = [(f, os.path.join(target, os.path.relpath(f, src))) for f in _walk(src)]
+    if len(pairs) > IMPORT_MAX_FILES:
+        raise ValueError(f"That's {len(pairs)} files; copy a smaller folder "
+                         f"(at most {IMPORT_MAX_FILES}).")
+    if sum(os.path.getsize(s) for s, _ in pairs) > IMPORT_MAX_MB * 1024 * 1024:
+        raise ValueError(f"That's over {IMPORT_MAX_MB} MB; copy only what the job needs.")
+    copied, skipped = [], []
+    for s, d in pairs:
+        resolve(project, d)  # stays inside the project, and out of .banana
+        if os.path.exists(d) and not overwrite:
+            skipped.append(shown(project, d))
+            continue
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        shutil.copy2(s, d)
+        copied.append(shown(project, d))
+    out = {"from": src, "copied": copied or ["(nothing)"]}
+    if skipped:
+        out["kept_existing"] = skipped
+        out["note"] = "Those were already in the project; pass overwrite=true to replace them."
+    return out
 
 
 # -- what changed ---------------------------------------------------------------

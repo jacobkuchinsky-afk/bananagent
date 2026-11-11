@@ -126,7 +126,8 @@ The summary is relayed to the user in a small chat box, so write it as a few pla
 # Rules
 
 - Everything happens inside this project's folder, in the sandbox at {{sandbox}}.
-- Never tell Claude to reach outside the project folder, publish anything other than deploying the app as described in "Putting it online", or touch the user's other files, unless the user explicitly asked for exactly that.
+- The one exception is reading Autopilot's job folders (your first message says where). When the task builds on files a job made, list and read them there by full path, and copy what the work needs into the project with sandbox_import — no need to ask the user. Claude can read them by full path too; tell it where they are. Never change anything in those folders: work on the copies.
+- Never tell Claude to reach outside the project folder (other than reading those job folders), publish anything other than deploying the app as described in "Putting it online", or touch the user's other files, unless the user explicitly asked for exactly that.
 - Never claim a tool did something unless its result says so. If you're unsure whether something worked, check.
 - If a tool fails, read the error and fix the call, or work around it. Don't repeat the same failing call.
 

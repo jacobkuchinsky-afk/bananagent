@@ -127,6 +127,10 @@ CODER_KEEP_RECENT = 8  # messages at the end that are never shortened
 # How long a question to the user waits before it gives up and carries on.
 CODER_QUESTION_SECONDS = 1800.0
 CODER_APPROVAL_SECONDS = 900.0
+# Folders outside the sandbox (relative to the app) the coding agent and Claude
+# may read — never write — with no approval: Autopilot's job folders, so code
+# can be built from what a job wrote (workbench/jobs/<job>/files/).
+CODER_READ_DIRS = ["workbench/jobs"]
 
 # Claude Code. None finds it: on PATH, ~/.local/bin, or the desktop app's copy.
 CLAUDE_EXE = None

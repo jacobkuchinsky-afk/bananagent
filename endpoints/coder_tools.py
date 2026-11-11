@@ -3,12 +3,14 @@
 All scope=CODER, so none of them appear in the assistant's own tool list —
 the assistant starts the coding agent with code_do (endpoints/coding.py) and
 these are what the coding agent then works with. They act on the project the
-current task is in; nothing here takes a folder outside the sandbox.
+current task is in. Nothing here writes outside the sandbox; the read tools
+(and sandbox_import) also take full paths in Autopilot's job folders
+(workspace.READ_ROOTS), so the agent can use what a job made.
 
     Claude     claude_send, claude_wait, claude_sessions, claude_history,
                claude_stop, claude_allow
     sandbox    sandbox_list, sandbox_read, sandbox_search, sandbox_write,
-               sandbox_edit, sandbox_run, sandbox_projects
+               sandbox_edit, sandbox_run, sandbox_projects, sandbox_import
     the job    coding_plan, ask_user, coding_finish
 
 Claude does the coding. The sandbox file tools exist so the agent can check
@@ -232,8 +234,10 @@ def claude_allow(rule, why):
 @endpoint(
     tier=MINOR, scope=CODER,
     description="Lists the files in the project folder (or a folder inside it), with "
-                "sizes. Dependency and cache folders are left out.",
-    params={"path": param("string", "A folder inside the project; '.' for all of it.",
+                "sizes. Dependency and cache folders are left out. Also lists an "
+                "Autopilot job's folder, given its full path.",
+    params={"path": param("string", "A folder inside the project ('.' for all of it), "
+                                    "or the full path of an Autopilot job folder.",
                           default="."),
             "depth": param("integer", "How many levels of folders to go down.", default=3)},
     returns="An indented listing.",
@@ -244,8 +248,10 @@ def sandbox_list(path=".", depth=3):
 
 @endpoint(
     tier=MINOR, scope=CODER, result_chars=14000,
-    description="Reads a file in the project, with line numbers.",
-    params={"path": param("string", "The file, relative to the project folder.",
+    description="Reads a file in the project, with line numbers — or a file an "
+                "Autopilot job made, by its full path.",
+    params={"path": param("string", "The file, relative to the project folder, or a "
+                                    "full path in an Autopilot job folder.",
                           required=True),
             "start": param("integer", "First line to show.", default=1),
             "lines": param("integer", "How many lines, up to 400.", default=250)},
@@ -257,7 +263,8 @@ def sandbox_read(path, start=1, lines=250):
 
 @endpoint(
     tier=MINOR, scope=CODER,
-    description="Searches the project's files for a regular expression (or plain text).",
+    description="Searches the project's files (or an Autopilot job folder's, by full "
+                "path) for a regular expression (or plain text).",
     params={"pattern": param("string", "What to look for.", required=True),
             "path": param("string", "Folder or file to search in.", default="."),
             "glob": param("string", "Only files whose name matches, e.g. *.py.")},
@@ -330,6 +337,28 @@ def sandbox_run(command, timeout=120):
 )
 def sandbox_projects():
     return workspace.projects() or "The sandbox is empty."
+
+
+@endpoint(
+    tier=MAJOR, scope=CODER,
+    description=(
+        "Copies a file or a whole folder that an Autopilot job made (anything under "
+        "its job folders) into the project, so Claude can work on it. No approval "
+        "needed; the original is left as it is. Files already in the project are kept "
+        "unless overwrite is true."
+    ),
+    params={
+        "source": param("string", "Full path of the file or folder to copy, e.g. "
+                                  "<job folder>/files/index.html.", required=True),
+        "dest": param("string", "Where in the project: a folder (the default '.' is "
+                                "the project's top) or a new file name.", default="."),
+        "overwrite": param("boolean", "Replace project files with the same name.",
+                           default=False),
+    },
+    returns="The files copied, as project paths, and any that were kept.",
+)
+def sandbox_import(source, dest=".", overwrite=False):
+    return workspace.import_files(_project(), source, dest, bool(overwrite))
 
 
 # =============================================================================
