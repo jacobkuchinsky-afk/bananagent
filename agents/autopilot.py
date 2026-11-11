@@ -608,7 +608,7 @@ class AutopilotAgent(Agent):
     def context_note(self):
         """A line for the assistant's model with every message, while there's a
         job on: what it's doing, and the questions it's waiting on, so a plain
-        text that answers one can be passed on (see brain.context_notes)."""
+        text that answers one can be passed on (see brain._context_notes)."""
         job = self.job
         if job is None or (not self.busy() and not job.open_questions()):
             return None
@@ -626,4 +626,3 @@ class AutopilotAgent(Agent):
 
 
 _AGENT = register(AutopilotAgent())
-brain.context_note(_AGENT.context_note)
