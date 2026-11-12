@@ -140,7 +140,9 @@ def cloud_env():
                     # The Gmail login is send_email's alone (endpoints/mail.py),
                     # and the Google sign-in client and the Discord bot's token
                     # are integrations/' alone.
-                    if key.strip().startswith(("GMAIL_", "GOOGLE_", "DISCORD_")):
+                    # Claude Code's sign-in token is claude_code's alone too: never
+                    # in sandbox_run's commands.
+                    if key.strip().startswith(("GMAIL_", "GOOGLE_", "DISCORD_", "CLAUDE_")):
                         continue
                     env[key.strip()] = value.strip().strip('"').strip("'")
     except OSError:

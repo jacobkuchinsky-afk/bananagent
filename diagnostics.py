@@ -25,12 +25,17 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _GB = 1024 ** 3
 
 _gpu = None  # (name, total_vram_bytes), probed once
+# One client for every poll. httpx.get() builds a new one each call, and with
+# it a fresh SSL context (loading the whole certificate store) — four per poll,
+# every 1.5s while the dashboard is open, which kept a core busy on its own.
+_client = httpx.Client()
 
 
 def _api(route, timeout=2.5, **body):
     url = config.OLLAMA_HOST.rstrip("/") + route
     try:
-        r = httpx.post(url, json=body, timeout=timeout) if body else httpx.get(url, timeout=timeout)
+        r = _client.post(url, json=body, timeout=timeout) if body else \
+            _client.get(url, timeout=timeout)
         return r.json() if r.status_code == 200 else None
     except Exception:
         return None

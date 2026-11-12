@@ -249,14 +249,31 @@ def _git(*args, check=True, timeout=120, git_dir=None):
     if git_dir:
         cmd += ["--git-dir", git_dir, "--work-tree", ROOT]
     cmd += list(args)
-    # Never wait on a prompt nobody can see; Git Credential Manager may still
-    # open its own sign-in window the first time on a new computer.
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    # Never wait on a prompt nobody can see. GIT_TERMINAL_PROMPT covers git's
+    # own; GCM_INTERACTIVE covers Git Credential Manager, which otherwise sits
+    # waiting on a sign-in window when its GitHub login runs out — measured:
+    # it held a fetch for a day, and the app's startup with it.
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never")
     env.pop("GIT_DIR", None)
     env.pop("GIT_WORK_TREE", None)
-    p = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=timeout,
-                       creationflags=_NO_WINDOW)
+    # Not subprocess.run(timeout=): on Windows that kills git.exe alone, and
+    # the helpers it started (git-remote-https, the credential manager) keep
+    # its output pipes open, so collecting the output then hangs for good.
+    # On a timeout the whole tree goes.
+    proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True, creationflags=_NO_WINDOW)
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise subprocess.TimeoutExpired(cmd, timeout) from None
+    p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     if check and p.returncode != 0:
         msg = (p.stderr or p.stdout).strip().splitlines()
         raise GitError(f"git {args[0]}: {msg[-1] if msg else f'exit {p.returncode}'}")

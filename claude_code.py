@@ -131,7 +131,8 @@ def read_rules():
 def _env():
     """Our environment, minus the markers that make Claude think it's being
     started from inside another Claude session (it refuses to nest), plus the
-    Vercel and Neon keys so it can deploy."""
+    Vercel and Neon keys so it can deploy, and the long-lived sign-in token
+    from secrets.env if there is one."""
     env = workspace.cloud_env()
     hosted = "CLAUDE_CODE_ENTRYPOINT" in env
     for key in list(env):
@@ -142,10 +143,83 @@ def _env():
         # Launched from inside a Claude session (while testing, say): its base
         # URL points at that host's connection, not at this login's.
         env.pop("ANTHROPIC_BASE_URL", None)
+    token = saved_token()
+    if token:
+        env[TOKEN_KEY] = token
     return env
 
 
-_auth = {"at": 0.0, "value": None}
+# -- signing in -------------------------------------------------------------------
+# The CLI's own login (claude auth login, kept in ~/.claude/.credentials.json)
+# lasts hours and renews itself with a refresh token — until it can't, and then
+# every message fails with "401 OAuth access token is invalid" while
+# `claude auth status` still says it's logged in. The sturdy way is a token
+# from `claude setup-token`, which lasts a year, kept in secrets.env (synced to
+# the other computers through the private memory repo) under this name.
+TOKEN_KEY = "CLAUDE_CODE_OAUTH_TOKEN"
+_AUTH_ERROR = re.compile(r"\b401\b|oauth (?:access )?token|failed to authenticate|"
+                         r"invalid api key|please run /login|authentication_error", re.I)
+
+
+def saved_token():
+    """The `claude setup-token` token from secrets.env, or None."""
+    try:
+        with open(os.path.join(workspace.APP, config.SECRETS_FILE), encoding="utf-8") as f:
+            for line in f:
+                key, sep, value = line.strip().partition("=")
+                if sep and key.strip() == TOKEN_KEY:
+                    return value.strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+    return None
+
+
+def _credentials_path():
+    home = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    return os.path.join(home, ".credentials.json")
+
+
+def _login_expired():
+    """The date the CLI's saved login ran out, if it has and can't renew
+    itself (no refresh token); else None."""
+    try:
+        with open(_credentials_path(), encoding="utf-8") as f:
+            oauth = (json.load(f) or {}).get("claudeAiOauth") or {}
+        expires = float(oauth.get("expiresAt") or 0) / 1000
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    if expires and expires < time.time() and not oauth.get("refreshToken"):
+        return time.strftime("%b %d, %Y", time.localtime(expires))
+    return None
+
+
+def _login_fingerprint():
+    """Changes whenever the user signs in again, either way."""
+    try:
+        stamp = os.path.getmtime(_credentials_path())
+    except OSError:
+        stamp = None
+    return stamp, saved_token()
+
+
+def sign_in_fix(exe=None):
+    exe = exe or find_exe() or "claude"
+    return (f'To fix it, on this computer open PowerShell and run: & "{exe}" setup-token — '
+            f"sign in when the browser opens, then add the token it prints to "
+            f"{config.SECRETS_FILE} as a line {TOKEN_KEY}=<token>. That lasts a year and "
+            f"the next coding job picks it up; no restart needed.")
+
+
+def is_auth_error(text):
+    return bool(_AUTH_ERROR.search(str(text or "")))
+
+
+def sign_in_rejected():
+    """A turn was refused for a bad sign-in: fail fast until the user signs in again."""
+    _auth.update(at=0.0, value=None, rejected=_login_fingerprint())
+
+
+_auth = {"at": 0.0, "value": None, "rejected": None}
 
 
 def auth_status():
@@ -165,10 +239,20 @@ def auth_status():
             info = json.loads(r.stdout.decode("utf-8", errors="replace") or "{}")
         except Exception as e:
             info = {"loggedIn": None, "error": str(e)}
-        if info.get("loggedIn") is False:
+        expired = None if saved_token() else _login_expired()
+        if info.get("loggedIn") is False and not saved_token():
             value = {"ok": False, "exe": exe,
-                     "problem": f'Claude Code isn\'t signed in. In a terminal, run: '
-                                f'"{exe}" auth login'}
+                     "problem": "Claude Code isn't signed in. " + sign_in_fix(exe)}
+        elif expired:
+            value = {"ok": False, "exe": exe,
+                     "problem": f"Claude Code's sign-in ran out on {expired} and can't renew "
+                                f"itself, so it can't do any coding. Retrying won't help. "
+                                + sign_in_fix(exe)}
+        elif _auth.get("rejected") is not None and _auth["rejected"] == _login_fingerprint():
+            value = {"ok": False, "exe": exe,
+                     "problem": "Claude Code's sign-in was refused (401: OAuth access token "
+                                "is invalid), so it can't do any coding. Retrying won't help. "
+                                + sign_in_fix(exe)}
         else:
             # None means the check itself failed; let a real turn say what's wrong.
             value = {"ok": True, "exe": exe, "method": info.get("authMethod")}
@@ -346,6 +430,13 @@ class Session:
         if "No conversation found" in reply:
             finished["hint"] = ("This session's history is gone. Send again with fresh=true "
                                 "and re-explain the task.")
+        elif finished["is_error"] and not self._stopped and is_auth_error(reply):
+            sign_in_rejected()
+            finished["hint"] = ("Claude Code couldn't sign in, so every message (in any "
+                                "session) will fail the same way: don't retry. Call "
+                                "coding_finish now with outcome blocked, and put this in "
+                                "your report for the user, word for word: "
+                                "Claude Code's sign-in isn't valid. " + sign_in_fix())
         self.turns.append(finished)
         self.last = finished
         self.current = None

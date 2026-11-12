@@ -680,6 +680,12 @@ class ChatPage:
         c = dash.canvas
         self._items = {}      # block key -> its canvas items, made as blocks first appear
         self._measured = {}   # canvas text item -> (text, wrap, width, height)
+        # Where each item was last put and whether it was shown, so a frame in
+        # which nothing moved makes no Tk calls. Without this every frame
+        # re-placed every item of the whole conversation, 30 times a second,
+        # and a long chat kept a core busy just sitting there.
+        self._xy = {}
+        self._st = {}
         self._tool_hits = []  # (x0, y0, x1, y1, part) for each tool line on screen
         self._rich = []       # the replies on screen, as RichText, for their links and buttons
         self.fonts = richtext.Fonts(dash._px)
@@ -887,6 +893,7 @@ class ChatPage:
             for item in (self.tip, self.tip_bg):
                 c.itemconfig(item, state="hidden")
             self._tool_hits, self._rich = [], []
+            self._st.clear()
 
     def _blocks(self, chat, now):
         """The conversation as things to draw, oldest first.
@@ -994,6 +1001,8 @@ class ChatPage:
                     continue
                 c.delete(item)
                 self._measured.pop(item, None)
+                self._xy.pop(item, None)
+                self._st.pop(item, None)
 
         # Keep the scroll between the newest message and the oldest one.
         total = list_bottom + self.scroll - cursor
@@ -1025,10 +1034,10 @@ class ChatPage:
         if d._sizes.get(bg) != size:
             d._sizes[bg] = size
             d._panel(bg, x, top, bw, bh, colour, radius=16)
-        d.canvas.coords(bg, x - shadow - 3, top - shadow - 3)
+        self._at(bg, x - shadow - 3, top - shadow - 3)
         view.place(x + pad_x, top + pad_y)
         on = top + bh + shadow > list_top and top < list_bottom
-        d.canvas.itemconfig(bg, state="normal" if on else "hidden")
+        self._show(bg, on)
         view.show(on)
         if on:
             self._rich.append(view)
@@ -1105,11 +1114,11 @@ class ChatPage:
         if d._sizes.get(bg) != size:
             d._sizes[bg] = size
             d._panel(bg, bx, top, bw, bh, colour, radius=16)
-        c.coords(bg, bx - shadow - 3, top - shadow - 3)
-        c.coords(item, bx + pad_x, top + pad_y)
+        self._at(bg, bx - shadow - 3, top - shadow - 3)
+        self._at(item, bx + pad_x, top + pad_y)
         on = top + bh + shadow > list_top and top < list_bottom
         for i in (bg, item):
-            c.itemconfig(i, state="normal" if on else "hidden")
+            self._show(i, on)
         return top
 
     def _draw_tool(self, key, part, x, bottom, wrap, list_top, list_bottom, now):
@@ -1136,8 +1145,8 @@ class ChatPage:
         top = bottom - height
         on = top + height > list_top and top < list_bottom
 
-        c.coords(label, lx, top)
-        c.itemconfig(label, state="normal" if on else "hidden")
+        self._at(label, lx, top)
+        self._show(label, on)
         if opened:
             size = (int(bw), int(bh))
             if d._sizes.get(box) != size:
@@ -1148,18 +1157,19 @@ class ChatPage:
                 s.stroke(shape, INK, d._px(1.2), alpha=0.25)
                 d._sheet(box, s)
             box_top = top + lh + d._px(6)
-            c.coords(box, lx, box_top)
-            c.coords(code, lx + pad_x, box_top + pad_y)
-            c.coords(stream, lx + pad_x, box_top + pad_y + ch + d._px(10))
+            self._at(box, lx, box_top)
+            self._at(code, lx + pad_x, box_top + pad_y)
+            self._at(stream, lx + pad_x, box_top + pad_y + ch + d._px(10))
         for item in (box, code):
-            c.itemconfig(item, state="normal" if on and opened else "hidden")
-        c.itemconfig(stream, state="normal" if on and opened and run is not None else "hidden")
+            self._show(item, on and opened)
+        self._show(stream, on and opened and run is not None)
 
         # The pill: green with a tick once the agent has finished the job.
         badge = _run_badge(run, now) if run is not None else None
         if badge and on:
             text, fill, ink = badge
-            c.itemconfig(pill_text, text=text, fill=ink, state="normal")
+            c.itemconfig(pill_text, text=text, fill=ink)
+            self._show(pill_text, True)
             x0, y0, x1, y1 = c.bbox(pill_text)
             pw, ph = int(x1 - x0 + d._px(18)), int(lh + d._px(2))
             if d._sizes.get(pill) != (pw, ph, fill):
@@ -1170,16 +1180,30 @@ class ChatPage:
                 s.stroke(shape, INK, d._px(1.2), alpha=0.35)
                 d._sheet(pill, s)
             px_ = lx + lw + d._px(10)
-            c.coords(pill, px_, top - d._px(1))
-            c.coords(pill_text, px_ + d._px(9), top - d._px(1) + ph / 2)
-            c.itemconfig(pill, state="normal")
+            self._at(pill, px_, top - d._px(1))
+            self._at(pill_text, px_ + d._px(9), top - d._px(1) + ph / 2)
+            self._show(pill, True)
             c.tag_raise(pill_text, pill)
         else:
-            c.itemconfig(pill, state="hidden")
-            c.itemconfig(pill_text, state="hidden")
+            self._show(pill, False)
+            self._show(pill_text, False)
         if on:
             self._tool_hits.append((lx, top, lx + lw, top + lh, part))
         return top
+
+    def _at(self, item, x, y):
+        """canvas.coords, skipped when the item is already there."""
+        xy = (round(x, 1), round(y, 1))
+        if self._xy.get(item) != xy:
+            self._xy[item] = xy
+            self.d.canvas.coords(item, x, y)
+
+    def _show(self, item, on):
+        """Show or hide an item, skipped when it already is."""
+        state = "normal" if on else "hidden"
+        if self._st.get(item) != state:
+            self._st[item] = state
+            self.d.canvas.itemconfig(item, state=state)
 
     def _measure(self, item, text, wrap):
         """A text item's size, remeasured only when its text or width changes."""
@@ -1189,6 +1213,7 @@ class ChatPage:
             return cached[2:]
         # A hidden item has no bounding box, so it has to be shown to be measured.
         c.itemconfig(item, text=text, width=wrap, state="normal")
+        self._st[item] = "normal"
         x0, y0, x1, y1 = c.bbox(item)
         self._measured[item] = (text, wrap, x1 - x0, y1 - y0)
         return x1 - x0, y1 - y0
