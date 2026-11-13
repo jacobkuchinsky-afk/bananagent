@@ -980,7 +980,10 @@ it's also a platform, so `integrations_status` shows it and `integration_connect
   reply ends, the reply carries on to answer it. None of that uses up tool rounds.
 - **Files both ways.** What you send is saved under `discord-files/<date>/`; pictures are
   shown to the model (qwen3.8 has vision), small text files are read into the message,
-  and anything else is a path its other tools can use. It sends files with `discord_send`.
+  and anything else is a path its other tools can use. It sends a file with `discord_send`,
+  and many at once with `discord_send_files`: folders go as a zip, and a file over the
+  10 MB bot limit is zipped or split into numbered parts (`.001`, `.002` …) that 7-Zip
+  opens as one.
 - **Agents' news follows you.** If you last wrote from Discord, an agent finishing or
   needing you is texted to you there instead of popping up in the corner.
 
@@ -988,6 +991,7 @@ The texting rules are their own prompt part, `prompts/texting.md`, in every syst
 prompt rather than swapped in for Discord messages — a system message that changed with
 where you wrote from would stop the Spark reusing its cache. Its tools are in
 `endpoints/texting.py`: `discord_send` (text and/or a file, to here or any chat),
+`discord_send_files` (files and folders, any number and size),
 `discord_chats`, `discord_read`, `discord_react` and `discord_get_files`.
 
 ### Setting up the bot (once)

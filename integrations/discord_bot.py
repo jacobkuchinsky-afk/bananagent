@@ -29,10 +29,14 @@ worker threads and block on the bot's loop.
 import asyncio
 import base64
 import concurrent.futures
+import glob
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
+import zipfile
 from dataclasses import dataclass, field
 
 import config
@@ -304,17 +308,23 @@ async def _receive(message):
                     answer=text if answer_to else None)
 
 
-async def _save(att, message_id, want_image=True):
+async def _save(att, message_id, want_image=True, folder=None):
     """Save one attachment. Returns (a line telling the model about it, the
-    path or None, the image as base64 if the model should see it)."""
+    path or None, the image as base64 if the model should see it). With
+    `folder`, it's saved there under its own name (numbered if one's taken)
+    rather than in the day's folder under DISCORD_FILES_DIR."""
     size = f"{att.size / 1024:.0f} KB" if att.size < 1024 * 1024 else \
         f"{att.size / 1024 / 1024:.1f} MB"
     if att.size > config.DISCORD_DOWNLOAD_MAX_MB * 1024 * 1024:
         return f"(attached {att.filename}, {size} — too big to download, not saved)", None, None
-    folder = os.path.join(FILES, time.strftime("%Y-%m-%d"))
-    os.makedirs(folder, exist_ok=True)
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", att.filename) or "file"
-    path = os.path.join(folder, f"{message_id}-{safe}")
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+        path = _free_name(os.path.join(folder, safe))
+    else:
+        folder = os.path.join(FILES, time.strftime("%Y-%m-%d"))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"{message_id}-{safe}")
     await att.save(path)
 
     kind = (att.content_type or "").split(";")[0].strip().lower()
@@ -402,12 +412,13 @@ class Reply:
             self._buffer = ""
         self._push(None)
 
-    def send(self, content=None, path=None, timeout=None, view=None):
+    def send(self, content=None, path=None, timeout=None, view=None, paths=None):
         """Send now, in order with the reply's own texts. Blocks; returns the
         message id. For the endpoints, while this chat has a reply going out.
         `view` makes the message's buttons (see _send)."""
         future = concurrent.futures.Future()
-        self._push(("send", {"content": content, "path": path, "view": view}, future, False))
+        self._push(("send", {"content": content, "path": path, "view": view,
+                             "paths": paths}, future, False))
         return future.result(timeout or config.DISCORD_SEND_SECONDS)
 
     # the bot's side
@@ -523,18 +534,21 @@ def _messages(text):
     return out
 
 
-async def _send(channel, content=None, path=None, reference=None, view=None):
+async def _send(channel, content=None, path=None, reference=None, view=None, paths=None):
     """`view`, if given, is a function that makes the message's discord.ui.View:
-    a View has to be made on the bot's own loop, so it's built here."""
+    a View has to be made on the bot's own loop, so it's built here. `paths`
+    attaches several files (up to 10) to the one message."""
     import discord
 
-    if not content and not path:
+    if not content and not path and not paths:
         raise ValueError("Nothing to send: give some text or a file.")
     kwargs = {"allowed_mentions": discord.AllowedMentions(everyone=False, roles=False,
                                                          users=True, replied_user=False)}
     if reference is not None:
         kwargs["reference"] = reference
-    if path:
+    if paths:
+        kwargs["files"] = [discord.File(p) for p in paths]
+    elif path:
         kwargs["file"] = discord.File(path)
     if view is not None:
         kwargs["view"] = view()
@@ -883,14 +897,246 @@ def react(message_id=None, emoji="👍", chat=None):
     return _call(go())
 
 
-def save_files(message_id, chat=None):
+def save_files(message_id, chat=None, save_to=None):
+    folder = None
+    if save_to:
+        folder = os.path.abspath(os.path.expandvars(os.path.expanduser(str(save_to))))
+        if os.path.isfile(folder):
+            raise ValueError(f"{folder} is a file; save_to takes a folder.")
+
     async def go():
         channel = await _resolve(chat)
         msg = await channel.fetch_message(int(message_id))
         if not msg.attachments:
             raise ValueError("That message has no files.")
-        return [(await _save(a, msg.id, want_image=False))[0] for a in msg.attachments]
-    return _call(go(), timeout=config.DISCORD_SEND_SECONDS * 4)
+        return [(await _save(a, msg.id, want_image=False, folder=folder))[0]
+                for a in msg.attachments]
+    return _call(go(), timeout=config.DISCORD_TRANSFER_SECONDS)
+
+
+# -- file transfers (discord_send_files) -----------------------------------------------
+# Many files, folders and files too big for one upload. Folders go as a zip;
+# a file over the limit is zipped, and if that's still too big, cut into
+# numbered parts (name.zip.001, .002 …) that 7-Zip opens as one, each on a
+# message of its own. Everything else is packed up to ten to a message.
+_MAX_ATTACHMENTS = 10           # files on one Discord message
+_HEADROOM = 256 * 1024          # bytes kept under the limit for the upload's own overhead
+_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache"}
+# Already compressed: zipping these again only costs time.
+_PACKED_EXT = {".zip", ".7z", ".rar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".jpg",
+               ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".mkv", ".webm",
+               ".mp3", ".m4a", ".ogg", ".flac", ".pdf", ".docx", ".xlsx", ".pptx"}
+
+
+def _free_name(path):
+    """path, or "name (2).ext" and so on when that's taken."""
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(path):
+        n += 1
+        path = f"{base} ({n}){ext}"
+    return path
+
+
+def _expand(paths):
+    """The files and folders the model named: a list, or one string with a
+    path per line. A path that doesn't exist as written is tried as a
+    wildcard (*.png, **/*.py)."""
+    if isinstance(paths, str):
+        paths = re.split(r"[\r\n]+", paths)
+    found, missing = [], []
+    for p in paths or []:
+        p = str(p).strip().strip('"').strip("'")
+        if not p:
+            continue
+        p = os.path.abspath(os.path.expandvars(os.path.expanduser(p)))
+        if os.path.exists(p):
+            found.append(p)
+        elif any(c in p for c in "*?["):
+            hits = sorted(glob.glob(p, recursive=True))
+            if hits:
+                found.extend(hits)
+            else:
+                missing.append(p)
+        else:
+            missing.append(p)
+    if missing:
+        raise FileNotFoundError("There's nothing at " + ", ".join(missing) + ".")
+    seen, out = set(), []
+    for p in found:
+        key = os.path.normcase(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    if not out:
+        raise ValueError("Give at least one file or folder to send.")
+    return out
+
+
+def _zip(sources, dest):
+    """Zip files and folders into dest; a folder keeps its own name inside.
+    Returns how many folders were left out (_SKIP_DIRS)."""
+    skipped, used = 0, set()
+
+    def add(z, full, arc):
+        arc = arc.replace("\\", "/")
+        base, ext = os.path.splitext(arc)
+        n = 1
+        while arc.lower() in used:  # two files with one name: keep both
+            n += 1
+            arc = f"{base} ({n}){ext}"
+        used.add(arc.lower())
+        z.write(full, arc)
+
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for src in sources:
+            if not os.path.isdir(src):
+                add(z, src, os.path.basename(src))
+                continue
+            root = os.path.dirname(src.rstrip("\\/"))
+            for dirpath, dirs, files in os.walk(src):
+                keep = [d for d in dirs if d not in _SKIP_DIRS]
+                skipped += len(dirs) - len(keep)
+                dirs[:] = keep
+                for f in files:
+                    full = os.path.join(dirpath, f)
+                    add(z, full, os.path.relpath(full, root))
+    return skipped
+
+
+def _cut(path, part_bytes, out_dir):
+    """path in numbered pieces of part_bytes: name.001, name.002 …"""
+    parts = []
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(part_bytes)
+            if not chunk:
+                break
+            part = os.path.join(out_dir, f"{os.path.basename(path)}.{len(parts) + 1:03d}")
+            with open(part, "wb") as out:
+                out.write(chunk)
+            parts.append(part)
+    return parts
+
+
+def _size(n):
+    return f"{n / 1024:.0f} KB" if n < 1024 * 1024 else f"{n / 1024 / 1024:.1f} MB"
+
+
+def send_files(to=None, paths=None, text=None, zip_all=False, zip_name=None):
+    """Send files and folders, however many and however big (within
+    DISCORD_TRANSFER_MAX_PARTS). Blocks until the last one is up."""
+    items = _expand(paths)
+    if text:
+        text = _APP_LINK.sub(lambda m: m.group(1), str(text)).strip()
+        if len(text) > LIMIT:
+            raise ValueError(f"That's {len(text)} characters; one Discord message holds "
+                             f"{LIMIT}. Split it into a few.")
+    limit = config.DISCORD_UPLOAD_MAX_MB * 1024 * 1024 - _HEADROOM
+
+    async def find():
+        return await _resolve(to)
+
+    channel = _call(find())   # before any packing: a wrong `to` fails fast
+    outgoing = os.path.join(FILES, "outgoing")
+    os.makedirs(outgoing, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="send-", dir=outgoing)
+    notes, skipped = [], 0
+    try:
+        # 1. Everything as files: folders (or all of it, with zip_all) zipped.
+        files = []
+        if zip_all:
+            name = str(zip_name or "").strip() or (
+                os.path.basename(items[0].rstrip("\\/")) if len(items) == 1 else "files")
+            name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+            if not name.lower().endswith(".zip"):
+                name += ".zip"
+            dest = os.path.join(work, name)
+            skipped += _zip(items, dest)
+            files.append(dest)
+            notes.append(f"zipped {len(items)} item(s) into {name}")
+        else:
+            for item in items:
+                if os.path.isdir(item):
+                    folder = os.path.basename(item.rstrip("\\/"))
+                    dest = _free_name(os.path.join(work, folder + ".zip"))
+                    skipped += _zip([item], dest)
+                    files.append(dest)
+                    notes.append(f"zipped the folder {folder}")
+                else:
+                    files.append(item)
+
+        # 2. Anything still too big: zipped if that helps, else cut into parts.
+        singles, split = [], []   # split: (original name, [parts])
+        for f in files:
+            size = os.path.getsize(f)
+            if size <= limit:
+                singles.append(f)
+                continue
+            if os.path.splitext(f)[1].lower() not in _PACKED_EXT:
+                dest = _free_name(os.path.join(work, os.path.basename(f) + ".zip"))
+                _zip([f], dest)
+                if os.path.getsize(dest) <= limit:
+                    notes.append(f"zipped {os.path.basename(f)} ({_size(size)}) down to "
+                                 f"{_size(os.path.getsize(dest))}")
+                    singles.append(dest)
+                    continue
+                f, size = dest, os.path.getsize(dest)
+            count = -(-size // limit)
+            already = sum(len(p) for _, p in split)
+            if already + count > config.DISCORD_TRANSFER_MAX_PARTS:
+                raise ValueError(
+                    f"{os.path.basename(f)} is {_size(size)}: that's {count} uploads of "
+                    f"{config.DISCORD_UPLOAD_MAX_MB} MB, over the "
+                    f"{config.DISCORD_TRANSFER_MAX_PARTS} one transfer is allowed "
+                    "(DISCORD_TRANSFER_MAX_PARTS in config.py). Share it another way, "
+                    "like Google Drive.")
+            split.append((os.path.basename(f), _cut(f, limit, work)))
+
+        # 3. Into messages: singles up to ten and the limit per message, then
+        # each part on its own, with how to put them back together.
+        messages, batch, total = [], [], 0
+        for f in singles:
+            size = os.path.getsize(f)
+            if batch and (len(batch) >= _MAX_ATTACHMENTS or total + size > limit):
+                messages.append((None, batch))
+                batch, total = [], 0
+            batch.append(f)
+            total += size
+        if batch:
+            messages.append((None, batch))
+        for name, parts in split:
+            for i, part in enumerate(parts, 1):
+                caption = f"-# {name} — part {i} of {len(parts)}"
+                if i == 1:
+                    caption = (f"**{name}** comes in {len(parts)} parts. Save them all to "
+                               f"one folder, then open the .001 with 7-Zip — or on Mac/"
+                               f"Linux: `cat \"{name}\".0* > \"{name}\"`\n{caption}")
+                messages.append((caption, [part]))
+            notes.append(f"split {name} into {len(parts)} parts")
+        if text:
+            first = messages[0][0] if messages else None
+            messages[0] = ((text + ("\n" + first if first else "")), messages[0][1])
+
+        # 4. Out, in order with the reply going to that chat if there is one.
+        for content, batch in messages:
+            reply = _active.get(channel.id)
+            if reply is not None and not reply._over:
+                reply.send(content, paths=batch, timeout=config.DISCORD_TRANSFER_SECONDS)
+            else:
+                _call(_send(channel, content=content, paths=batch),
+                      timeout=config.DISCORD_TRANSFER_SECONDS)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    sent = len(singles) + sum(len(p) for _, p in split)
+    if skipped:
+        notes.append(f"left {skipped} folder(s) like .git and node_modules out of the zip")
+    out = (f"Sent {sent} file(s) in {len(messages)} message(s) to {_describe(channel)}.")
+    if notes:
+        said = "; ".join(notes)
+        out += " " + said[0].upper() + said[1:] + "."
+    return out
 
 
 def _short(text, n):

@@ -321,6 +321,11 @@ DISCORD_SHOW_IMAGES = True
 DISCORD_INLINE_TEXT_CHARS = 6000
 DISCORD_CONNECT_SECONDS = 30
 DISCORD_SEND_SECONDS = 30  # one send, before an endpoint gives up on it
+# discord_send_files: a file over DISCORD_UPLOAD_MAX_MB is zipped, and if it's
+# still too big, split into numbered parts (one message each) — up to this
+# many parts in one transfer, so a stray 2 GB file can't flood the chat.
+DISCORD_TRANSFER_MAX_PARTS = 20
+DISCORD_TRANSFER_SECONDS = 180  # one upload message, before giving up on it
 
 # --- Syncing between computers ------------------------------------------------
 # cloud_sync.py keeps every computer BananaGent runs on the same, through GitHub.

@@ -27,6 +27,9 @@ thing with buttons is ask_question: a question you ask with it goes to their
 chat with a button for each choice, or one that opens a box to type in. To give
 them a file — one they ask for, or one you or an agent made — send it with
 discord_send and its file argument; a path means nothing on their phone.
+For several files, a folder, or anything over 10 MB, use discord_send_files:
+it zips folders and splits big files into parts for you. To put a file they
+sent somewhere specific, discord_get_files with save_to.
 Your reply already goes back to the chat on its own, so never use
 discord_send to repeat it. Use discord_send for a file, or for a message to
 a different chat or person when they ask you to.
