@@ -204,10 +204,14 @@ def _login_fingerprint():
 
 def sign_in_fix(exe=None):
     exe = exe or find_exe() or "claude"
-    return (f'To fix it, on this computer open PowerShell and run: & "{exe}" setup-token — '
-            f"sign in when the browser opens, then add the token it prints to "
-            f"{config.SECRETS_FILE} as a line {TOKEN_KEY}=<token>. That lasts a year and "
-            f"the next coding job picks it up; no restart needed.")
+    fix = (f'To fix it, on this computer open PowerShell and run: & "{exe}" auth login — '
+           f"and sign in when the browser opens. The next coding job picks it up; no "
+           f"restart needed.")
+    if saved_token():
+        fix += (f" The {TOKEN_KEY} line in {config.SECRETS_FILE} is being used instead of "
+                f"that login and was refused, so delete that line too (or replace it with "
+                f"a fresh token from setup-token).")
+    return fix
 
 
 def is_auth_error(text):
